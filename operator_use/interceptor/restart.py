@@ -87,7 +87,7 @@ class RestartInterceptor(Interceptor):
             return  # first snapshot wins
 
         original = file_path.read_text(encoding="utf-8")
-        file_hash = hashlib.md5(str(file_path).encode()).hexdigest()[:10]
+        file_hash = hashlib.md5(str(file_path).encode()).hexdigest()[:10]  # nosec B324 — used for filename only, not security
         snapshot_file = self._session_dir / f"{file_hash}.original"
         snapshot_file.write_text(original, encoding="utf-8")
 
@@ -165,6 +165,7 @@ class RestartInterceptor(Interceptor):
 # Standalone recovery helpers — called by the supervisor (no agent available)
 # ---------------------------------------------------------------------------
 
+
 def revert_session(session_id: str, userdata: Path) -> list[str]:
     """Restore all files in a session to their pre-session originals.
 
@@ -208,6 +209,7 @@ def load_session_diffs(session_id: str, userdata: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 # InterceptorLog
 # ---------------------------------------------------------------------------
+
 
 class InterceptorLog:
     """Persistent JSONL record of self-improvement attempts.

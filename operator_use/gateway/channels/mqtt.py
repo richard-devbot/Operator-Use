@@ -1,4 +1,4 @@
-﻿"""MQTT channel — connects IoT sensors and devices to the agent via an MQTT broker.
+"""MQTT channel — connects IoT sensors and devices to the agent via an MQTT broker.
 
 Topic convention (default prefix = "operator"):
   Incoming:  {prefix}/in/{device_id}   → agent receives message from device
@@ -31,8 +31,7 @@ class MQTTChannel(BaseChannel):
         self._client: Optional[aiomqtt.Client] = None
         self._stop_event = asyncio.Event()
 
-    def _cfg(self, key, default=None):
-        return getattr(self.config, key, default)
+    # _cfg inherited from BaseChannel
 
     @property
     def name(self) -> str:
@@ -99,7 +98,7 @@ class MQTTChannel(BaseChannel):
 
         # Extract device_id from topic: "operator/in/sensor1" → "sensor1"
         if topic.startswith(prefix):
-            device_id = topic[len(prefix):]
+            device_id = topic[len(prefix) :]
         else:
             device_id = topic
 

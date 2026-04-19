@@ -40,6 +40,9 @@ from Quartz import (
     CGMainDisplayID,
     CGDisplayPixelsWide,
     CGDisplayPixelsHigh,
+    CGDisplayCopyDisplayMode,
+    CGDisplayModeGetPixelWidth,
+    CGDisplayModeGetPixelHeight,
     CGDisplayBounds,
     CGGetActiveDisplayList,
     CGWindowListCopyWindowInfo,
@@ -84,6 +87,7 @@ if TYPE_CHECKING:
     from macos_mcp.ax.controls import ApplicationControl, Control, WindowControl
 
 from .enums import (
+    AXError,
     AXValueType,
     Attribute,
     KeyCode,
@@ -481,6 +485,136 @@ def GetElementPid(element: Any) -> Optional[int]:
     return None
 
 
+# =============================================================================
+# Parsing helpers for AX value objects
+# =============================================================================
+
+def _parse_ax_position(pos_val) -> Optional[Tuple[float, float]]:
+    """
+    Parse an AXValue of type Position into (x, y) coordinates.
+
+    Args:
+        pos_val: An AXValue representing a position, or None.
+
+    Returns:
+        Tuple of (x, y) as floats, or None if parsing fails.
+    """
+    if pos_val is None:
+        return None
+    try:
+        from ApplicationServices import AXValueGetType, AXValueGetValue
+        from Cocoa import NSPoint
+
+        # Check if it's an AXValue with type Position (0)
+        val_type = AXValueGetType(pos_val)
+        if val_type != AXValueType.Position:
+            return None
+
+        # AXValueGetValue returns (error, value)
+        error, point_obj = AXValueGetValue(pos_val, None)
+        if error != kAXErrorSuccess:
+            return None
+
+        # Extract x, y from the point object
+        if hasattr(point_obj, 'x') and hasattr(point_obj, 'y'):
+            return (float(point_obj.x), float(point_obj.y))
+    except Exception:
+        pass
+    return None
+
+
+def _parse_ax_size(size_val) -> Optional[Tuple[float, float]]:
+    """
+    Parse an AXValue of type Size into (width, height).
+
+    Args:
+        size_val: An AXValue representing a size, or None.
+
+    Returns:
+        Tuple of (width, height) as floats, or None if parsing fails.
+    """
+    if size_val is None:
+        return None
+    try:
+        from ApplicationServices import AXValueGetType, AXValueGetValue
+
+        # Check if it's an AXValue with type Size (1)
+        val_type = AXValueGetType(size_val)
+        if val_type != AXValueType.Size:
+            return None
+
+        # AXValueGetValue returns (error, value)
+        error, size_obj = AXValueGetValue(size_val, None)
+        if error != kAXErrorSuccess:
+            return None
+
+        # Extract width, height from the size object
+        if hasattr(size_obj, 'width') and hasattr(size_obj, 'height'):
+            return (float(size_obj.width), float(size_obj.height))
+    except Exception:
+        pass
+    return None
+
+
+# =============================================================================
+# Batch Attribute Reading for Tree Traversal
+# =============================================================================
+
+_TRAVERSAL_ATTRIBUTES = [
+    Attribute.Role,
+    Attribute.Subrole,
+    Attribute.Position,
+    Attribute.Size,
+    Attribute.Hidden,
+    Attribute.Enabled,
+    Attribute.Help,
+    Attribute.Title,
+    Attribute.Description,
+    Attribute.Identifier,
+    Attribute.Value,
+]
+
+
+def GetTraversalBatch(element: Any) -> dict:
+    """
+    Fetch all attributes needed for accessibility tree traversal in a single API call.
+
+    Replaces ~10 individual GetAttribute calls per element with one
+    AXUIElementCopyMultipleAttributeValues call, giving a significant speedup
+    when traversing large UI trees.
+
+    Returns a dict with pre-parsed, ready-to-use values:
+        role, subrole, hidden, enabled, help, title, description,
+        identifier, value, label (computed), rect (Rect | None)
+    """
+    raw = GetMultipleAttributeValues(element, _TRAVERSAL_ATTRIBUTES)
+
+    pos = _parse_ax_position(raw.get(Attribute.Position))
+    size = _parse_ax_size(raw.get(Attribute.Size))
+    rect = Rect.from_position_size(pos[0], pos[1], size[0], size[1]) if pos and size else None
+
+    title = raw.get(Attribute.Title) or ''
+    identifier = raw.get(Attribute.Identifier) or ''
+    description = raw.get(Attribute.Description) or ''
+    value = raw.get(Attribute.Value)
+    value_str = str(value) if value is not None else ''
+    label = title or identifier or description or value_str
+
+    return {
+        'role': raw.get(Attribute.Role) or '',
+        'subrole': raw.get(Attribute.Subrole) or '',
+        'hidden': raw.get(Attribute.Hidden) is True,
+        'enabled': raw.get(Attribute.Enabled) is not False,
+        'help': raw.get(Attribute.Help) or '',
+        'title': title,
+        'description': description,
+        'identifier': identifier,
+        'value': value,
+        'label': label,
+        'rect': rect,
+    }
+
+
 def GetMultipleAttributeValues(
     element: Any,
     attributes: Sequence[str],
@@ -507,10 +641,22 @@ def GetMultipleAttributeValues(
         if error == kAXErrorSuccess and values:
             result = {}
             for attr, val in zip(attributes, values):
-                # AXUIElementCopyMultipleAttributeValues returns kAXErrorSuccess
-                # per-attribute errors are represented as AXError values in the array
-                if not isinstance(val, int) or val >= 0:
-                    result[attr] = val
+                # AXUIElementCopyMultipleAttributeValues returns kAXErrorSuccess overall,
+                # but per-attribute errors are embedded in the array as either negative
+                # ints or AXValue objects of type kAXValueAXErrorType (5).
+                if val is None:
+                    continue
+                if isinstance(val, int) and val < 0:
+                    continue
+                # Detect AXValue error objects (kAXValueAXErrorType = 5)
+                if not isinstance(val, (str, bool, int, float, list, dict)):
+                    try:
+                        from ApplicationServices import AXValueGetType
+                        if AXValueGetType(val) == AXValueType.AXError:
+                            continue
+                    except Exception:
+                        pass
+                result[attr] = val
             return result
     except Exception:
         pass
@@ -638,15 +784,19 @@ def GetScreenSize() -> Tuple[int, int]:
 
     # Fallback to main display
     main_display = CGMainDisplayID()
-    width = CGDisplayPixelsWide(main_display)
-    height = CGDisplayPixelsHigh(main_display)
+    mode = CGDisplayCopyDisplayMode(main_display)
+    width = CGDisplayModeGetPixelWidth(mode) if mode else CGDisplayPixelsWide(main_display)
+    height = CGDisplayModeGetPixelHeight(mode) if mode else CGDisplayPixelsHigh(main_display)
     return (width, height)
 
 
 def GetMainDisplaySize() -> Tuple[int, int]:
     """Get the resolution of the main display. Returns (width, height)."""
     main_display = CGMainDisplayID()
-    return (CGDisplayPixelsWide(main_display), CGDisplayPixelsHigh(main_display))
+    mode = CGDisplayCopyDisplayMode(main_display)
+    width = CGDisplayModeGetPixelWidth(mode) if mode else CGDisplayPixelsWide(main_display)
+    height = CGDisplayModeGetPixelHeight(mode) if mode else CGDisplayPixelsHigh(main_display)
+    return (width, height)
 
 
 def GetDisplayCount() -> int:
@@ -686,7 +836,8 @@ def GetDPIScale() -> float:
     """
     try:
         main_display = CGMainDisplayID()
-        pixel_width = CGDisplayPixelsWide(main_display)
+        mode = CGDisplayCopyDisplayMode(main_display)
+        pixel_width = CGDisplayModeGetPixelWidth(mode) if mode else CGDisplayPixelsWide(main_display)
         bounds = CGDisplayBounds(main_display)
         point_width = bounds.size.width
         if point_width > 0:
@@ -694,6 +845,44 @@ def GetDPIScale() -> float:
     except Exception:
         pass
     return 1.0
+
+
+def GetPerDisplayInfo() -> list[dict]:
+    """
+    Get per-display geometry and scale information.
+
+    For each active display returns a dict with:
+        logical_left, logical_top   — position in macOS logical coordinate space
+        logical_width, logical_height
+        pixel_width, pixel_height   — native physical resolution
+        scale                       — pixel_width / logical_width (2.0 for Retina)
+
+    Results are sorted left-to-right by logical_left, which matches the order
+    displays are laid out in the combined ImageGrab screenshot.
+    """
+    displays = []
+    try:
+        res = CGGetActiveDisplayList(32, None, None)
+        if res and res[1]:
+            for display_id in res[1]:
+                bounds = CGDisplayBounds(display_id)
+                lw = bounds.size.width
+                lh = bounds.size.height
+                mode = CGDisplayCopyDisplayMode(display_id)
+                pw = CGDisplayModeGetPixelWidth(mode) if mode else CGDisplayPixelsWide(display_id)
+                ph = CGDisplayModeGetPixelHeight(mode) if mode else CGDisplayPixelsHigh(display_id)
+                displays.append({
+                    'logical_left': bounds.origin.x,
+                    'logical_top': bounds.origin.y,
+                    'logical_width': lw,
+                    'logical_height': lh,
+                    'pixel_width': pw,
+                    'pixel_height': ph,
+                    'scale': pw / lw if lw > 0 else 1.0,
+                })
+    except Exception:
+        pass
+    return sorted(displays, key=lambda d: d['logical_left'])
 
 
 # =============================================================================

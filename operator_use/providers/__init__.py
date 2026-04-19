@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unified provider package for Windows-Use.
 
 Each provider lives in its own sub-package (e.g. ``providers.google``)
@@ -14,7 +14,18 @@ Shared base protocols and data models:
 # Base protocols & data models
 from operator_use.providers.base import BaseChatLLM, BaseSTT, BaseTTS, BaseImage, BaseSearch
 from operator_use.providers.views import TokenUsage, Metadata
-from operator_use.providers.events import Thinking, LLMEvent, LLMStreamEvent, ToolCall
+from operator_use.providers.events import (
+    Thinking,
+    LLMEvent,
+    LLMStreamEvent,
+    LLMEventType,
+    LLMStreamEventType,
+    ToolCall,
+    StopReason,
+    map_openai_stop_reason,
+    map_anthropic_stop_reason,
+    map_google_stop_reason,
+)
 
 # LLM providers
 from operator_use.providers.anthropic import ChatAnthropic
@@ -30,6 +41,7 @@ from operator_use.providers.vllm import ChatVLLM
 from operator_use.providers.nvidia import ChatNvidia
 from operator_use.providers.deepseek import ChatDeepSeek
 from operator_use.providers.xai import ChatXai, TTSXai, ImageXai
+from operator_use.providers.zai import ChatZAI
 
 try:
     from operator_use.providers.codex import ChatCodex
@@ -55,6 +67,7 @@ except ImportError:
 from operator_use.providers.openai import STTOpenAI
 from operator_use.providers.google import STTGoogle
 from operator_use.providers.groq import STTGroq
+
 try:
     from operator_use.providers.elevenlabs import STTElevenLabs
 except ImportError:
@@ -77,7 +90,6 @@ from operator_use.providers.google import TTSGoogle
 # Image generation providers
 from operator_use.providers.openai import ImageOpenAI
 from operator_use.providers.google import ImageGoogle
-from operator_use.providers.xai import ImageXai
 
 try:
     from operator_use.providers.together import ImageTogether
@@ -89,7 +101,6 @@ try:
 except ImportError:
     pass
 from operator_use.providers.groq import TTSGroq
-from operator_use.providers.xai import TTSXai
 
 try:
     from operator_use.providers.elevenlabs import TTSElevenLabs
@@ -133,8 +144,14 @@ __all__ = [
     "Metadata",
     "Thinking",
     "LLMEvent",
+    "LLMEventType",
     "LLMStreamEvent",
+    "LLMStreamEventType",
     "ToolCall",
+    "StopReason",
+    "map_openai_stop_reason",
+    "map_anthropic_stop_reason",
+    "map_google_stop_reason",
     # LLM providers
     "ChatAnthropic",
     "ChatGoogle",
@@ -149,6 +166,7 @@ __all__ = [
     "ChatNvidia",
     "ChatDeepSeek",
     "ChatXai",
+    "ChatZAI",
     "ChatCodex",
     "ChatClaudeCode",
     "ChatAntigravity",

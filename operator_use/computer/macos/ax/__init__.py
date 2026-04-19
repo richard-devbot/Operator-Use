@@ -103,6 +103,7 @@ from .core import (
     GetRect,
     ElementAtPosition,
     GetElementPid,
+    GetTraversalBatch,
     GetMultipleAttributeValues,
     GetAttributeValues,
     GetActionDescription,
@@ -114,6 +115,7 @@ from .core import (
     GetDisplayCount,
     GetDisplayBounds,
     GetDPIScale,
+    GetPerDisplayInfo,
     CaptureScreen,
     CGImageToPIL,
     # Mouse

@@ -112,21 +112,21 @@ The agent reads and can self-update a `workspace/` directory. Everything here is
 | `skills/{name}/SKILL.md` | Procedural skill guides. YAML frontmatter (`name`, `description`) + Markdown instructions. Loaded on trigger. |
 | `skills/{name}/.history/` | Auto-snapshotted version history whenever SKILL.md is overwritten. |
 | `tools/*.py` | Custom Python tools. Auto-loaded at startup — no restart needed. |
-| `knowledge/` | Stable reference docs (`context.md` per topic). Index shown at startup; content loaded on demand. |
+| `knowledge/` | Stable reference docs (`index.md` per topic). Index shown at startup; content loaded on demand. |
 | `sessions/` | Serialized conversation history (`.jsonl` per session). |
 
 ### Custom Tool Format
 
 ```python
 # workspace/tools/my_tool.py
-from operator_use.tools.service import Tool, ToolResult
+from operator_use.tools import Tool, ToolResult
 from pydantic import BaseModel
 
 class MyParams(BaseModel):
     input: str
 
 @Tool(name="my_tool", description="What this tool does", model=MyParams)
-def my_tool(input: str) -> ToolResult:
+def my_tool(input: str, **kwargs) -> ToolResult:
     result = do_something(input)
     return ToolResult.success_result(result)
 ```

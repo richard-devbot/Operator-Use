@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Callable
 
 from aiohttp import web
 
 from operator_use.acp.config import ACPServerConfig
+from operator_use.acp.device_flow import DeviceFlowManager
 from operator_use.acp.provenance import ACPProvenance, fetch_public_key
 from operator_use.acp.models import (
     AgentListResponse,
@@ -43,6 +45,7 @@ from operator_use.acp.models import (
     RunOutputEvent,
     RunStatus,
     TextMessagePart,
+    TokenResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,14 +73,21 @@ class ACPServer:
         metadata: dict[str, AgentMetadata],
     ) -> None:
         self.config = config
-        self._runners = runners        # agent_id -> runner callable
-        self._metadata = metadata      # agent_id -> AgentMetadata
+        self._runners = runners  # agent_id -> runner callable
+        self._metadata = metadata  # agent_id -> AgentMetadata
         self._runs: dict[str, Run] = {}
         self._run_queues: dict[str, asyncio.Queue] = {}  # run_id -> chunk queue for SSE
         # Provenance: loaded lazily when sign_responses or verify_signatures is True
         self._provenance: ACPProvenance | None = None
         # Cache of fetched peer public keys: agent_id -> public_key_b64
         self._peer_pubkeys: dict[str, str] = dict(config.trusted_agents)
+        self._device_flow: DeviceFlowManager | None = (
+            DeviceFlowManager(
+                tokens_path=config.tokens_path or ".operator_use/acp_tokens.json"
+            )
+            if config.device_flow_enabled
+            else None
+        )
         self._app = self._build_app()
         self._site: web.TCPSite | None = None
         self._runner_obj: web.AppRunner | None = None
@@ -95,6 +105,11 @@ class ACPServer:
         app.router.add_get("/runs/{run_id}", self._handle_get_run)
         app.router.add_delete("/runs/{run_id}", self._handle_cancel_run)
         app.router.add_get("/runs/{run_id}/await", self._handle_await_run)
+        if self.config.device_flow_enabled:
+            app.router.add_post("/auth/device", self._handle_device_request)
+            app.router.add_post("/auth/token", self._handle_device_token)
+            app.router.add_get("/auth/approve", self._handle_approve_page)
+            app.router.add_post("/auth/approve/{device_code}", self._handle_approve_action)
         return app
 
     @web.middleware
@@ -104,6 +119,9 @@ class ACPServer:
         Per-agent tokens (per_agent_tokens) take precedence over the global auth_token.
         When per-agent tokens are configured, each token grants access to exactly one agent —
         the caller cannot see or reach any other agent on this server.
+        When device_flow_enabled, all requests must carry a valid device-flow token.
+        The /auth/* endpoints are exempt so that new clients can obtain a code/token
+        without already having one.
         request["_authed_agent"]:
           - str  → caller is locked to this agent_id
           - None → global access (all agents allowed)
@@ -124,7 +142,13 @@ class ACPServer:
                 return web.Response(status=401, text="Unauthorized")
             request["_authed_agent"] = None  # global — all agents accessible
         else:
-            request["_authed_agent"] = None  # no auth configured — open access
+            if self._device_flow:
+                # /auth/* endpoints are open by design (device flow handshake)
+                if not request.path.startswith("/auth/") and (
+                    not provided or not self._device_flow.validate_token(provided)
+                ):
+                    return web.Response(status=401, text="Unauthorized")
+            request["_authed_agent"] = None
 
         return await handler(request)
 
@@ -200,11 +224,13 @@ class ACPServer:
             return web.json_response({"error": "agent not found"}, status=404)
         if not self._provenance:
             return web.json_response({"error": "provenance not enabled"}, status=404)
-        return web.json_response({
-            "agent_id": agent_id,
-            "algorithm": "ed25519",
-            "public_key": self._provenance.public_key_b64,
-        })
+        return web.json_response(
+            {
+                "agent_id": agent_id,
+                "algorithm": "ed25519",
+                "public_key": self._provenance.public_key_b64,
+            }
+        )
 
     async def _handle_create_run(self, request: web.Request) -> web.Response:
         try:
@@ -219,7 +245,9 @@ class ACPServer:
         authed: str | None = request.get("_authed_agent")
 
         # Resolve target agent: use requested agent_id, fall back to first available
-        target_agent_id = req.agent_id if req.agent_id in self._runners else next(iter(self._runners))
+        target_agent_id = (
+            req.agent_id if req.agent_id in self._runners else next(iter(self._runners))
+        )
 
         # Per-agent token: caller may only target their own agent
         if authed is not None and target_agent_id != authed:
@@ -309,6 +337,57 @@ class ACPServer:
         return response
 
     # ------------------------------------------------------------------
+    # Device Authorization Grant handlers (RFC 8628)
+    # ------------------------------------------------------------------
+
+    async def _handle_device_request(self, request: web.Request) -> web.Response:
+        base = self.config.public_url or f"http://{self.config.host}:{self.config.port}"
+        code = self._device_flow.create_code(verification_uri=f"{base}/auth/approve")
+        return web.json_response(code.model_dump())
+
+    async def _handle_device_token(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            device_code = body.get("device_code", "")
+        except Exception:
+            return web.json_response({"error": "invalid request"}, status=400)
+
+        status = self._device_flow.get_code_status(device_code)
+        if status == "approved":
+            token = self._device_flow.poll(device_code)
+            return web.json_response(TokenResponse(access_token=token).model_dump())
+        if status == "unknown_or_expired":
+            return web.json_response({"error": "expired_token"}, status=400)
+        # pending
+        return web.Response(status=202)
+
+    async def _handle_approve_page(self, request: web.Request) -> web.Response:
+        pending = self._device_flow.list_pending()
+        if not pending:
+            body = "<h1>No pending device requests</h1>"
+        else:
+            rows = []
+            now = time.monotonic()
+            for p in pending:
+                mins = max(0, int((p.expires_at - now) / 60))
+                rows.append(
+                    f"<form method='POST' action='/auth/approve/{p.device_code}' style='margin:1em 0'>"
+                    f"<p>Code: <strong>{p.user_code}</strong> &mdash; expires in ~{mins} min</p>"
+                    f"<button type='submit'>Approve</button></form>"
+                )
+            body = "<h1>Pending Device Connections</h1>" + "".join(rows)
+
+        html = f"<!DOCTYPE html><html><head><title>Approve Device</title></head><body>{body}</body></html>"
+        return web.Response(text=html, content_type="text/html")
+
+    async def _handle_approve_action(self, request: web.Request) -> web.Response:
+        device_code = request.match_info["device_code"]
+        token = self._device_flow.approve(device_code)
+        if token is None:
+            return web.Response(text="Code not found or expired.", status=404)
+        return web.Response(text="Approved. The remote device is now connected.", content_type="text/html")
+
+    # ------------------------------------------------------------------
     # Run execution
     # ------------------------------------------------------------------
 
@@ -352,16 +431,12 @@ class ACPServer:
     async def start(self) -> None:
         if self.config.sign_responses or self.config.verify_signatures:
             self._provenance = self._load_provenance()
-            logger.info(
-                f"ACP provenance enabled — pubkey: {self._provenance.public_key_b64[:16]}…"
-            )
+            logger.info(f"ACP provenance enabled — pubkey: {self._provenance.public_key_b64[:16]}…")
         self._runner_obj = web.AppRunner(self._app)
         await self._runner_obj.setup()
         self._site = web.TCPSite(self._runner_obj, self.config.host, self.config.port)
         await self._site.start()
-        logger.info(
-            f"ACP server listening on http://{self.config.host}:{self.config.port}"
-        )
+        logger.info(f"ACP server listening on http://{self.config.host}:{self.config.port}")
 
     def _load_provenance(self) -> ACPProvenance:
         if self.config.key_path:
@@ -374,4 +449,3 @@ class ACPServer:
         if self._runner_obj:
             await self._runner_obj.cleanup()
         logger.info("ACP server stopped")
-

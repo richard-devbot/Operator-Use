@@ -3,10 +3,10 @@
 from dataclasses import dataclass, field
 
 
-
 @dataclass
 class ACPServerConfig:
     """Configuration for the built-in ACP server (exposes Operator as an ACP agent)."""
+
     enabled: bool = False
     host: str = "0.0.0.0"
     port: int = 8765
@@ -30,11 +30,16 @@ class ACPServerConfig:
     trusted_agents: dict = field(default_factory=dict)
     # Advertised base URL of this server (included in X-ACP-Agent-URL on responses)
     public_url: str = ""
+    # Device Authorization Grant (RFC 8628)
+    device_flow_enabled: bool = False
+    # Path to JSON file for persisting approved tokens (default: .operator_use/acp_tokens.json)
+    tokens_path: str = ""
 
 
 @dataclass
 class ACPClientConfig:
     """Configuration for the ACP client channel (Operator calls a remote ACP agent)."""
+
     enabled: bool = False
     # Base URL of the remote ACP server (e.g. "http://localhost:9000")
     base_url: str = ""
@@ -65,6 +70,7 @@ class ACPStdioConfig:
     responses to stdout — letting IDEs and CLI tools (Claude Code, Zed,
     Codex, etc.) pipe directly into the agent without an HTTP server.
     """
+
     enabled: bool = False
     agent_id: str = "operator"
     agent_name: str = "Operator"

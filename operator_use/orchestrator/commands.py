@@ -38,7 +38,9 @@ async def handle_command(
 
     if command == "start":
         session_name = args or None
-        target_session_id = f"{default_session_id}:{session_name}" if session_name else default_session_id
+        target_session_id = (
+            f"{default_session_id}:{session_name}" if session_name else default_session_id
+        )
         text = await _cmd_start(target_session_id, agent, session_name)
         if session_name:
             session_overrides[default_session_id] = target_session_id
@@ -69,15 +71,19 @@ async def handle_command(
 # Individual command implementations
 # ---------------------------------------------------------------------------
 
+
 async def _cmd_start(session_id: str, agent: "Agent", session_name: str | None = None) -> str:
-    existing = agent.sessions.load(session_id)
     name_label = f" '{session_name}'" if session_name else ""
-    if existing and existing.messages:
+    if agent.sessions.load(session_id) is not None:
         return f"Session{name_label} is already active. Use /stop to end it first."
+    fresh = agent.sessions.get_or_create(session_id)
+    agent.sessions.save(fresh)
     return f"Session{name_label} started.\n\n{_HELP_TEXT}"
 
 
 async def _cmd_stop(session_id: str, agent: "Agent") -> str:
+    if agent.sessions.load(session_id) is None:
+        return "No active session to stop. Use /start to begin one."
     agent.sessions.archive(session_id)
     return "Session saved and closed.\nUse /start to begin a new session."
 
@@ -95,7 +101,8 @@ async def _cmd_restart(agent: "Agent", message: IncomingMessage) -> str:
 def _save_restart_notification(channel: str, chat_id: str, account_id: str) -> None:
     """Persist the channel to notify after the process restarts."""
     try:
-        from operator_use.agent.tools.builtin.control_center import RESTART_FILE
+        from operator_use.tools.control_center import RESTART_FILE
+
         data = json.loads(RESTART_FILE.read_text()) if RESTART_FILE.exists() else {}
         data["notify_restart"] = {"channel": channel, "chat_id": chat_id, "account_id": account_id}
         RESTART_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -20,6 +20,22 @@ Use the `browser_task` tool to perform web browsing tasks. Describe the full tas
 and the tool will run an isolated browser agent with its own context window (30-iteration budget). \
 The agent returns a summary of what was accomplished.
 
+<perception>
+Before each browser interaction, current browser state (URL, visible elements, page title) is \
+injected automatically into your context so you always have an up-to-date view of the page.
+</perception>
+
+<tool_use>
+Use `browser_task` to delegate browsing goals. Describe the full goal in natural language — \
+the browser subagent handles navigation, clicking, typing, and scraping internally.
+</tool_use>
+
+<execution_principles>
+- One `browser_task` call per distinct goal. Chain calls for multi-step workflows.
+- Prefer specific, outcome-oriented descriptions: "Find the price of X on Y" not "go to Y".
+- If a task fails, inspect the returned error and retry with a clearer description.
+</execution_principles>
+
 **Setup:**
 
 Start Chrome with remote debugging enabled:
@@ -56,6 +72,7 @@ class BrowserPlugin(Plugin):
 
     def get_tools(self) -> list:
         from operator_use.web.subagent import browser_task
+
         return [browser_task]
 
     def get_system_prompt(self) -> str | None:
@@ -71,16 +88,16 @@ class BrowserPlugin(Plugin):
                 registry.register(tool)
 
     def unregister_tools(self, registry: "ToolRegistry") -> None:
+        registry.unset_extension("browser")
+        registry.unset_extension("_browser")
         for tool in self.get_tools():
             if registry.get(tool.name) is not None:
                 registry.unregister(tool.name)
 
     def register_hooks(self, hooks: "Hooks") -> None:
         self._hooks = hooks
-        # Hooks are not registered to main agent (subagent manages its own state injection)
 
     def unregister_hooks(self, hooks: "Hooks") -> None:
-        # No-op: hooks were never registered to main agent
         pass
 
     def attach_prompt(self, context: "Context") -> None:
@@ -100,12 +117,15 @@ class BrowserPlugin(Plugin):
         """Synchronously initialise Browser (safe to call at startup)."""
         from operator_use.web.browser.service import Browser
         from operator_use.web.browser.config import BrowserConfig
+
         if self.browser is None:
             self.browser = Browser(config=BrowserConfig(use_system_profile=True))
 
     async def enable(self) -> None:
         """Dynamically enable browser_use at runtime."""
         self._enabled = True
+        if self._hooks is not None:
+            pass
         if self._registry is not None:
             if self.browser is not None:
                 self._registry.set_extension("browser", self.browser)
@@ -120,6 +140,8 @@ class BrowserPlugin(Plugin):
     async def disable(self) -> None:
         """Dynamically disable browser_use at runtime."""
         self._enabled = False
+        if self._hooks is not None:
+            self.unregister_hooks(self._hooks)
         if self._registry is not None:
             self.unregister_tools(self._registry)
         if self._context is not None:
@@ -132,6 +154,7 @@ class BrowserPlugin(Plugin):
 
     async def _state_hook(self, ctx: "BeforeLLMCallContext") -> "BeforeLLMCallContext":
         from operator_use.messages import HumanMessage
+
         try:
             if self.browser._client is None:
                 return ctx

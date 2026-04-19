@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+import logging
 from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 from operator_use.tools import Tool, ToolResult
 from operator_use.computer.windows import uia, vdm
+
+logger = logging.getLogger(__name__)
 
 
 KEY_ALIASES = {
@@ -199,6 +202,18 @@ async def computer(
             if clicks == 0:
                 uia.SetCursorPos(x, y)
                 return ToolResult.success_result(f"Moved cursor to ({x},{y}).")
+            # Cursorless path: only for left single clicks
+            if button == "left" and clicks == 1:
+                try:
+                    control = uia.ControlFromPoint(x, y)
+                    if control is not None:
+                        invoke = control.GetPattern(uia.PatternId.InvokePattern)
+                        if invoke is not None:
+                            invoke.Invoke()
+                            return ToolResult.success_result(f"Single left clicked at ({x},{y}).")
+                except Exception:
+                    logger.debug("Cursorless click failed at (%s,%s), falling back to coordinates", x, y, exc_info=True)
+            # Coordinate fallback
             match button:
                 case "left":
                     if clicks >= 2:
@@ -210,7 +225,9 @@ async def computer(
                 case "middle":
                     uia.MiddleClick(x, y)
             labels = {1: "Single", 2: "Double", 3: "Triple"}
-            return ToolResult.success_result(f"{labels.get(clicks, str(clicks))} {button} clicked at ({x},{y}).")
+            return ToolResult.success_result(
+                f"{labels.get(clicks, str(clicks))} {button} clicked at ({x},{y})."
+            )
 
         case "type":
             if not loc:
@@ -218,6 +235,22 @@ async def computer(
             if text is None:
                 return ToolResult.error_result("text is required for type.")
             x, y = loc[0], loc[1]
+            # Cursorless path: only when caret_position is idle
+            if caret_position == "idle":
+                try:
+                    control = uia.ControlFromPoint(x, y)
+                    if control is not None:
+                        vp = control.GetPattern(uia.PatternId.ValuePattern)
+                        if vp is not None and not vp.IsReadOnly:
+                            vp.SetValue(text)
+                            if press_enter:
+                                uia.SendKeys("{Enter}", waitTime=0.05)
+                            return ToolResult.success_result(f"Typed at ({x},{y}).")
+                        if vp is not None and vp.IsReadOnly:
+                            logger.debug("ValuePattern at (%s,%s) is ReadOnly, falling back", x, y)
+                except Exception:
+                    logger.debug("Cursorless type failed at (%s,%s), falling back to coordinates", x, y, exc_info=True)
+            # Coordinate fallback
             uia.Click(x, y)
             if caret_position == "start":
                 uia.SendKeys("{Home}", waitTime=0.05)
@@ -243,14 +276,18 @@ async def computer(
                     elif direction == "down":
                         uia.WheelDown(wheel_times)
                     else:
-                        return ToolResult.error_result('Invalid direction for vertical scroll. Use "up" or "down".')
+                        return ToolResult.error_result(
+                            'Invalid direction for vertical scroll. Use "up" or "down".'
+                        )
                 case "horizontal":
                     if direction == "left":
                         uia.WheelLeft(wheel_times)
                     elif direction == "right":
                         uia.WheelRight(wheel_times)
                     else:
-                        return ToolResult.error_result('Invalid direction for horizontal scroll. Use "left" or "right".')
+                        return ToolResult.error_result(
+                            'Invalid direction for horizontal scroll. Use "left" or "right".'
+                        )
                 case _:
                     return ToolResult.error_result('Invalid axis. Use "vertical" or "horizontal".')
             return ToolResult.success_result(f"Scrolled {axis} {direction} by {wheel_times}.")
@@ -289,7 +326,9 @@ async def computer(
 
         case "desktop":
             if not desktop_action:
-                return ToolResult.error_result("desktop_action is required for desktop (create, remove, rename, switch).")
+                return ToolResult.error_result(
+                    "desktop_action is required for desktop (create, remove, rename, switch)."
+                )
             try:
                 match desktop_action:
                     case "create":
@@ -302,16 +341,22 @@ async def computer(
                         return ToolResult.success_result(f"Removed desktop '{desktop_name}'")
                     case "rename":
                         if not desktop_name or not new_name:
-                            return ToolResult.error_result("desktop_name and new_name are required for rename.")
+                            return ToolResult.error_result(
+                                "desktop_name and new_name are required for rename."
+                            )
                         vdm.rename_desktop(desktop_name, new_name)
-                        return ToolResult.success_result(f"Renamed '{desktop_name}' to '{new_name}'")
+                        return ToolResult.success_result(
+                            f"Renamed '{desktop_name}' to '{new_name}'"
+                        )
                     case "switch":
                         if not desktop_name:
                             return ToolResult.error_result("desktop_name is required for switch.")
                         vdm.switch_desktop(desktop_name)
                         return ToolResult.success_result(f"Switched to desktop '{desktop_name}'")
                     case _:
-                        return ToolResult.error_result(f"Unknown desktop_action: {desktop_action!r}. Use create, remove, rename, or switch.")
+                        return ToolResult.error_result(
+                            f"Unknown desktop_action: {desktop_action!r}. Use create, remove, rename, or switch."
+                        )
             except Exception as e:
                 return ToolResult.error_result(str(e))
 

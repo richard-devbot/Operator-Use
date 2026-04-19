@@ -47,7 +47,9 @@ def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
 class _TwitchBot(commands.Bot):
     """twitchio Bot subclass that routes messages to a TwitchChannel."""
 
-    def __init__(self, channel: "TwitchChannel", token: str, nick: str, channel_name: str, prefix: str) -> None:
+    def __init__(
+        self, channel: "TwitchChannel", token: str, nick: str, channel_name: str, prefix: str
+    ) -> None:
         # twitchio expects token without the "oauth:" prefix in some versions
         super().__init__(token=token, nick=nick, prefix=prefix, initial_channels=[channel_name])
         self._operator_channel = channel
@@ -74,8 +76,7 @@ class TwitchChannel(BaseChannel):
         # stream_state: chat_id -> accumulated text buffer
         self._stream_buffer: dict[str, str] = {}
 
-    def _cfg(self, key: str, default=None):
-        return getattr(self.config, key, default)
+    # _cfg inherited from BaseChannel
 
     @property
     def name(self) -> str:
@@ -132,10 +133,8 @@ class TwitchChannel(BaseChannel):
     async def _on_message(self, message: twitchio.Message) -> None:
         """Handle an incoming Twitch chat message."""
         channel_name = self._cfg("channel_name") or ""
-        allowed = self._cfg("allow_from") or []
-
         author_name = message.author.name if message.author else ""
-        if allowed and author_name not in allowed:
+        if not self._is_user_allowed(author_name):
             return
 
         content = message.content or ""
@@ -156,7 +155,12 @@ class TwitchChannel(BaseChannel):
                     parts=[TextPart(content=content.strip())],
                     user_id=author_name,
                     account_id=self._cfg("account_id") or "",
-                    metadata={"username": author_name, "channel": channel_name, "_command": cmd, "_command_args": command_args},
+                    metadata={
+                        "username": author_name,
+                        "channel": channel_name,
+                        "_command": cmd,
+                        "_command_args": command_args,
+                    },
                 )
                 await self.receive(incoming)
                 return

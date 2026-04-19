@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 
 
-class ProcessSession:
+class Process:
     def __init__(self, session_id: str, cmd: str, process: asyncio.subprocess.Process):
         self.session_id = session_id
         self.cmd = cmd

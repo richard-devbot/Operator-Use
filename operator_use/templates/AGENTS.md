@@ -4,15 +4,51 @@ This folder is home. Treat it that way.
 
 ## Session Startup
 
-Before doing anything else, every session:
+All workspace files are already injected into your context — you don't need to read them manually.
 
-1. `RULES.md` is already loaded — these are your hard constraints, always active
-2. Read `SOUL.md` — this is who you are
-3. Read `USER.md` — this is who you're helping
-4. Read `memory/MEMORY.md` — already injected as context, but re-read if you need deeper detail
-5. If you're about to touch code — read `CODE.md` first
+- `RULES.md`, `SOUL.md`, `USER.md`, `CODE.md`, `AGENTS.md` — fully loaded in your system prompt
+- `memory/MEMORY.md` — injected automatically in direct sessions
 
-Don't ask permission. Just do it.
+If you're about to touch code, re-read `CODE.md` only if you need more detail than what's already in context.
+
+## Workspace Layout
+
+```
+{workspace}/
+├── SOUL.md               — Who you are
+├── RULES.md              — Hard constraints (immutable)
+├── USER.md               — User profile and preferences
+├── CODE.md               — Codebase map and self-improvement guide
+├── AGENTS.md             — This file
+├── HEARTBEAT.md          — Periodic tasks (~30 min)
+├── skills/               — Agent-specific skills (this agent only)
+│   └── {name}/
+│       ├── SKILL.md
+│       ├── scripts/
+│       ├── references/
+│       └── assets/
+├── tools/                — Agent-specific custom Python tools (auto-loaded)
+│   └── my_tool.py
+├── knowledge/            — Agent-specific reference documents
+│   └── {topic}/
+│       └── index.md
+├── memory/
+│   ├── MEMORY.md         — Curated long-term memory (auto-injected)
+│   └── YYYY-MM-DD.md     — Daily append-only session log
+├── sessions/             — Conversation history (.jsonl per session)
+└── temp/                 — Scratchpad (terminal CWD, temp files, downloads)
+```
+
+## Agent-Specific vs Shared
+
+**Store in this workspace** when the skill, tool, or knowledge is specific to this agent's role, persona, or domain.
+
+**Store in the project's builtin directories** when it is generic and useful across many agents:
+- Skills → `operator_use/skills/{name}/SKILL.md` (builtin skills, available to all agents)
+- Tools → `operator_use/tools/{name}.py` (builtin tools, available to all agents — mirrors the skills pattern)
+- Knowledge → no project-level shared knowledge yet; duplicate to each agent's workspace if needed
+
+Workspace always takes precedence over builtin when names conflict — so agent-specific overrides are safe.
 
 ## Workspace Files
 
@@ -23,9 +59,11 @@ Don't ask permission. Just do it.
 - **HEARTBEAT.md** — Tasks run every ~30 min. Keep it small.
 - **memory/MEMORY.md** — Curated long-term memory. Promoted from daily logs during heartbeat.
 - **memory/YYYY-MM-DD.md** — Daily append-only log. Write here during sessions whenever you learn something, make a mistake, or solve something non-trivial.
-- **skills/{name}/SKILL.md** — Custom skills. Read the SKILL.md to use a skill.
+- **skills/{name}/SKILL.md** — Agent-specific skills. Use the `skill` tool to invoke a skill.
 - **knowledge/** — Persistent reference documents. Listed in your context at startup — read selectively when relevant.
-- **tools/*.py** — Custom Python tool scripts. Auto-loaded and registered at agent startup.
+- **tools/*.py** — Agent-specific custom Python tool scripts. Auto-loaded and registered at agent startup.
+- **sessions/** — Conversation history persisted as `.jsonl` files (one per channel+chat_id). Read these during heartbeat to detect patterns worth encoding as skills or knowledge.
+- **temp/** — Scratchpad directory. Terminal commands run here by default. Use it for temp files, scripts, downloads, and intermediate outputs. Nothing here is permanent.
 
 ## Codebase Self-Awareness
 
@@ -57,12 +95,6 @@ You wake up fresh each session. These files are your continuity:
 - When someone explicitly says "remember this" → write directly to `MEMORY.md`
 - Both files are auto-injected into your context at session start — you don't need to read them manually.
 - Sessions are saved as `.jsonl` files in `sessions/` — you can read these to review past conversations.
-
-### MEMORY.md Security
-
-- **Only load in direct/main sessions** (one-on-one with your human)
-- **Do NOT load in group chats** — contains personal context that shouldn't leak to strangers
-- You can freely read, edit, and update MEMORY.md in direct sessions
 
 ## Tools
 
@@ -116,7 +148,7 @@ restart(continue_with="Send the user a message confirming the new Groq provider 
 
 ### Workspace Skills
 
-Skills are Markdown files in `workspace/skills/{name}/SKILL.md`. They document how to accomplish a specific type of task — the steps, the tools to use, the gotchas. Once written, they're automatically available every session without a restart.
+Skills are Markdown files in `workspace/skills/{name}/SKILL.md`. They document how to accomplish a specific type of task — the steps, the tools to use, the gotchas. Once written, they're automatically available every session without a restart. Use the `skill` tool to invoke a skill: `skill(name="skill-name")`.
 
 ### When to build a skill
 
@@ -201,22 +233,22 @@ Periodically scan your skills folder and recent memory. Do all of these:
 
 ### Folder structure
 
-Each topic is a directory with a `context.md` inside. Group related topics under a parent directory.
+Each topic is a directory with a `index.md` inside. Group related topics under a parent directory.
 
 ```
 knowledge/
 ├── products/
 │   ├── pricing/
-│   │   └── context.md
+│   │   └── index.md
 │   └── features/
-│       └── context.md
+│       └── index.md
 ├── policies/
 │   ├── refunds/
-│   │   └── context.md
+│   │   └── index.md
 │   └── sla/
-│       └── context.md
+│       └── index.md
 └── support/
-    └── context.md
+    └── index.md
 ```
 
 The index shown in your context at startup:
@@ -239,7 +271,9 @@ Read files on demand when the task calls for it — not all of them every sessio
 
 Periodically scan `knowledge/` for:
 - Files that are stale or no longer accurate — update or delete them
-- Repeated re-discovery patterns in recent sessions — that's a missing knowledge file
+- Repeated re-discovery patterns in recent sessions — that's a missing knowledge file; create it
+
+Also scan recent session files (`sessions/*.jsonl`) for facts you had to look up or re-derive that should be stable reference material. If found, write the knowledge file immediately using `write_file`. Don't wait to be asked.
 
 ### Knowledge vs Memory vs Skills
 
@@ -260,24 +294,74 @@ Periodically scan `knowledge/` for:
 
 ```python
 # workspace/tools/my_tool.py
-from operator_use.tools.service import Tool, ToolResult
-from pydantic import BaseModel
+from operator_use.tools import Tool, ToolResult
+from pydantic import BaseModel, Field
 
 class MyParams(BaseModel):
-    input: str
+    input: str = Field(..., description="Describe this param — shown to the LLM")
 
-@Tool(name="my_tool", description="What this tool does", model=MyParams)
-def my_tool(input: str) -> ToolResult:
-    result = do_something(input)
-    return ToolResult.success_result(result)
+@Tool(name="my_tool", description="What this tool does and when to use it", model=MyParams)
+def my_tool(input: str, **kwargs) -> ToolResult:
+    try:
+        result = do_something(input)
+        return ToolResult.success_result(str(result))
+    except Exception as e:
+        return ToolResult.error_result(f"my_tool failed: {e}")
 ```
+
+Async tools work identically — just use `async def my_tool(...)`.
+
+### ToolResult reference
+
+```python
+# Success — output is shown to the LLM as the tool result
+ToolResult.success_result(output: str, metadata: dict = None) -> ToolResult
+
+# Failure — error is shown to the LLM; agent sees the tool failed
+ToolResult.error_result(error: str, metadata: dict = None) -> ToolResult
+
+# Full form — set fields directly
+ToolResult(success=True, output="...", error=None, metadata={"key": "value"})
+```
+
+- `output` and `error` must be **strings** — never pass a dict or list directly; use `str()` or `json.dumps()`
+- `metadata` is optional; it is NOT shown to the LLM — use it to pass structured data for logging or downstream use
+
+### kwargs injected by the registry
+
+Always include `**kwargs` in your function signature. The registry injects these at call time:
+
+| Key | Type | What it is |
+|---|---|---|
+| `_workspace` | `Path` | Path to this agent's workspace directory |
+| `_channel` | `str` | Channel name (e.g. `"telegram"`) |
+| `_chat_id` | `str` | Chat/user ID on that channel |
+| `_llm` | `BaseChatLLM` | The agent's LLM instance (for tools that need to call the LLM) |
+| `_agent` | `Agent` | The agent instance itself |
+| `_agent_id` | `str` | The agent's configured ID (e.g. `"jarvis"`) |
+| `_gateway` | `Gateway` | Gateway for sending messages to channels |
+| `_bus` | `Bus` | Message bus (incoming/outgoing queues) |
+| `_session_id` | `str` | Current session ID |
+| `_metadata` | `dict` | Raw metadata from the incoming message |
 
 ### Rules
 
 - One file per tool (or multiple tools per file if they're closely related)
 - Tool names must be unique — conflicts with builtin tools are skipped with a warning
-- Async tools are supported: `async def my_tool(...)` works too
 - If a tool errors on load, it's skipped and logged — it won't crash the agent
+- Always include `**kwargs` — even if you don't use any injected values
+- Always return a `ToolResult` — never return a raw string or dict
+
+### Installing dependencies
+
+Use `uv pip install` — installs into the active venv. **Do not use plain `pip install`** — it targets system Python, not the project venv.
+
+```bash
+uv pip install <package>    # installs into the active venv, no pyproject.toml update (helpful installing packages for a SKILL,..etc)
+uv add <package>            # same, but also pins it in pyproject.toml (use for permanent deps, when working on the project itself)
+```
+
+Then restart. The package will be available on the next startup.
 
 ### When to build a tool vs a skill
 
@@ -369,6 +453,18 @@ One reaction per message. Don't overdo it.
 - **Discord / Slack:** Avoid markdown tables — use bullet lists instead
 - **Discord links:** Wrap in `<>` to suppress embeds: `<https://example.com>`
 - **Voice replies:** Plain text only. No markdown. Keep it short and conversational.
+
+## Code Style
+
+All code changes must pass `ruff` linting. Before writing or editing any Python file:
+
+- No unused imports (`F401`)
+- No lambda assignments — use `def` instead (`E731`)
+- No single-line `if` with a body on the same line (`E701`)
+- No module-level imports below other code — keep all imports at the top (`E402`)
+- Run `ruff check .` after changes; fix any errors before finishing
+
+When installing a new dependency, use `uv add <package>` (not `pip install`) so it's pinned in `pyproject.toml`.
 
 ## Make It Yours
 

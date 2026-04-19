@@ -1,7 +1,9 @@
 """Tool registry for the agent module."""
 
-from operator_use.tools.service import Tool,ToolResult
+from operator_use.agent.tools.service import Tool, ToolResult
+from pathlib import Path
 from typing import Any
+import importlib.util
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,10 +20,10 @@ class ToolRegistry:
         for tool in tools:
             self.register(tool)
 
-    def set_extension(self,name:str,extension:Any) -> None:
+    def set_extension(self, name: str, extension: Any) -> None:
         self._extensions[name] = extension
 
-    def unset_extension(self,name:str) -> None:
+    def unset_extension(self, name: str) -> None:
         self._extensions.pop(name, None)
 
     def unregister_tools(self, tools: list[Tool]) -> None:
@@ -42,13 +44,36 @@ class ToolRegistry:
             raise ValueError(f"Tool '{name}' not found")
         self._tools.pop(name, None)
 
+    def register_workspace_tools(self, tools_dir: Path, skip_existing: bool = True) -> None:
+        """Dynamically load and register Tool instances from all *.py files in a directory."""
+        if not tools_dir.exists():
+            return
+        for path in sorted(tools_dir.glob("*.py")):
+            try:
+                spec = importlib.util.spec_from_file_location(f"_workspace_tool_{path.stem}", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if isinstance(attr, Tool) and attr.function is not None:
+                        try:
+                            self.register(attr)
+                            logger.info(f"Workspace tool loaded | name={attr.name} file={path.name}")
+                        except ValueError:
+                            logger.warning(f"Workspace tool skipped (name conflict) | name={attr.name}")
+            except Exception as e:
+                logger.warning(f"Failed to load workspace tool | file={path.name} error={e}")
+
     def list_tools(self) -> list[Tool]:
         """Return all registered tools."""
         return list(self._tools.values())
 
-    def get(self, name: str) -> Tool | None:
-        """Get a tool by name."""
-        return self._tools.get(name)
+    def get(self, name: str) -> "Tool | Any | None":
+        """Get a tool by name. Also checks extensions (e.g. browser, desktop instances)."""
+        result = self._tools.get(name)
+        if result is not None:
+            return result
+        return self._extensions.get(name)
 
     def _merge_params(self, params: dict) -> dict:
         """Merge extensions with params. Params override extensions for same keys."""
@@ -58,9 +83,12 @@ class ToolRegistry:
         """Validate and coerce params through the tool's Pydantic model.
         Returns (errors, coerced_params). On validation failure, errors is non-empty."""
         from pydantic import ValidationError
+
         try:
             instance = tool.model(**params)
-            coerced = {k: v for k, v in instance.model_dump().items() if k in params or v is not None}
+            coerced = {
+                k: v for k, v in instance.model_dump().items() if k in params or v is not None
+            }
             return [], coerced
         except ValidationError:
             errors = tool.validate_params(params)

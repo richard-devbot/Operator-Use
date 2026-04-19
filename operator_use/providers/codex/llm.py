@@ -1,4 +1,4 @@
-﻿"""
+"""
 OpenAI Codex provider via ChatGPT subscription OAuth.
 
 Uses the ChatGPT backend API (chatgpt.com/backend-api/codex/responses)
@@ -30,6 +30,7 @@ from operator_use.providers.events import (
     LLMEventType,
     LLMStreamEvent,
     LLMStreamEventType,
+    StopReason,
     ToolCall,
 )
 from operator_use.providers.views import Metadata, TokenUsage
@@ -42,6 +43,7 @@ CODEX_PATH = "/codex/responses"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
+
 def _resolve_codex_home() -> Path:
     """Resolve ~/.codex directory, respecting CODEX_HOME env var."""
     configured = os.environ.get("CODEX_HOME")
@@ -53,6 +55,7 @@ def _resolve_codex_home() -> Path:
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
+
 
 def _load_auth() -> Optional[dict]:
     """
@@ -122,7 +125,11 @@ def _do_refresh(refresh_token: str) -> Optional[dict]:
     try:
         r = httpx.post(
             TOKEN_URL,
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": CLIENT_ID,
+            },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30.0,
         )
@@ -140,7 +147,11 @@ async def _async_refresh(refresh_token: str) -> Optional[dict]:
         async with httpx.AsyncClient() as client:
             r = await client.post(
                 TOKEN_URL,
-                data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID},
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": CLIENT_ID,
+                },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=30.0,
             )
@@ -157,6 +168,7 @@ async def _async_refresh(refresh_token: str) -> Optional[dict]:
 # Message / tool conversion
 # ---------------------------------------------------------------------------
 
+
 def _convert_messages(messages: List[BaseMessage]) -> tuple[Optional[str], list]:
     """Return (instructions, input_items) for Responses API."""
     instructions = None
@@ -166,45 +178,62 @@ def _convert_messages(messages: List[BaseMessage]) -> tuple[Optional[str], list]
         if isinstance(msg, SystemMessage):
             instructions = msg.content
         elif isinstance(msg, HumanMessage):
-            items.append({
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": msg.content}],
-            })
+            items.append(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": msg.content}],
+                }
+            )
         elif isinstance(msg, ImageMessage):
             content_parts = []
             if msg.content:
                 content_parts.append({"type": "input_text", "text": msg.content})
             for b64 in msg.convert_images(format="base64"):
-                content_parts.append({
-                    "type": "input_image",
-                    "image_url": f"data:{msg.mime_type};base64,{b64}",
-                })
+                content_parts.append(
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{msg.mime_type};base64,{b64}",
+                    }
+                )
             items.append({"type": "message", "role": "user", "content": content_parts})
         elif isinstance(msg, AIMessage):
-            items.append({
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": msg.content or ""}],
-            })
+            items.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": msg.content or ""}],
+                }
+            )
         elif isinstance(msg, ToolMessage):
             # Emit the function_call item then the function_call_output item
-            items.append({
-                "type": "function_call",
-                "call_id": msg.id,
-                "name": msg.name,
-                "arguments": json.dumps(msg.params),
-            })
-            items.append({
-                "type": "function_call_output",
-                "call_id": msg.id,
-                "output": msg.content or "",
-            })
+            items.append(
+                {
+                    "type": "function_call",
+                    "call_id": msg.id,
+                    "name": msg.name,
+                    "arguments": json.dumps(msg.params),
+                }
+            )
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": msg.id,
+                    "output": msg.content or "",
+                }
+            )
 
     return instructions, items
 
 
-_UNSUPPORTED_SCHEMA_KEYS = {"examples", "default", "additionalProperties", "$schema", "$defs", "title"}
+_UNSUPPORTED_SCHEMA_KEYS = {
+    "examples",
+    "default",
+    "additionalProperties",
+    "$schema",
+    "$defs",
+    "title",
+}
 
 
 def _sanitize_schema(obj):
@@ -231,6 +260,7 @@ def _convert_tools(tools: List[Tool]) -> list:
 # SSE parsing helpers
 # ---------------------------------------------------------------------------
 
+
 def _parse_sse_line(line: str) -> Optional[dict]:
     if line.startswith("data: "):
         data = line[6:].strip()
@@ -242,7 +272,9 @@ def _parse_sse_line(line: str) -> Optional[dict]:
     return None
 
 
-def _extract_event(event: dict) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def _extract_event(
+    event: dict,
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """Return (event_type, text_delta, tool_name, tool_args_delta)."""
     etype = event.get("type", "")
 
@@ -306,18 +338,21 @@ def _extract_final(events: list[dict]) -> LLMEvent:
             type=LLMEventType.TOOL_CALL,
             tool_call=ToolCall(id=tool_call_id, name=tool_name, params=params),
             usage=usage,
+            stop_reason=StopReason.TOOL_CALL,
         )
 
     return LLMEvent(
         type=LLMEventType.TEXT,
         content="".join(text_parts),
         usage=usage,
+        stop_reason=StopReason.END_TURN,
     )
 
 
 # ---------------------------------------------------------------------------
 # ChatCodex
 # ---------------------------------------------------------------------------
+
 
 class ChatCodex(BaseChatLLM):
     """
@@ -363,11 +398,13 @@ class ChatCodex(BaseChatLLM):
             logger.debug("Codex OAuth token expired, refreshing...")
             result = _do_refresh(self._auth.get("refresh", ""))
             if result:
-                self._auth.update({
-                    "access": result["access_token"],
-                    "refresh": result["refresh_token"],
-                    "expires": time.time() + result.get("expires_in", 3600),
-                })
+                self._auth.update(
+                    {
+                        "access": result["access_token"],
+                        "refresh": result["refresh_token"],
+                        "expires": time.time() + result.get("expires_in", 3600),
+                    }
+                )
                 _save_auth(self._auth)
             else:
                 raise RuntimeError("Failed to refresh Codex OAuth token. Run `codex login`.")
@@ -391,11 +428,13 @@ class ChatCodex(BaseChatLLM):
             logger.debug("Codex OAuth token expired, refreshing async...")
             result = await _async_refresh(self._auth.get("refresh", ""))
             if result:
-                self._auth.update({
-                    "access": result["access_token"],
-                    "refresh": result["refresh_token"],
-                    "expires": time.time() + result.get("expires_in", 3600),
-                })
+                self._auth.update(
+                    {
+                        "access": result["access_token"],
+                        "refresh": result["refresh_token"],
+                        "expires": time.time() + result.get("expires_in", 3600),
+                    }
+                )
                 _save_auth(self._auth)
             else:
                 raise RuntimeError("Failed to refresh Codex OAuth token. Run `codex login`.")
@@ -438,7 +477,9 @@ class ChatCodex(BaseChatLLM):
 
         return headers, body
 
-    async def _build_request_async(self, messages: List[BaseMessage], tools: List[Tool]) -> tuple[dict, dict]:
+    async def _build_request_async(
+        self, messages: List[BaseMessage], tools: List[Tool]
+    ) -> tuple[dict, dict]:
         token = await self._async_get_token()
         acct_id = _account_id(token)
 
@@ -481,7 +522,13 @@ class ChatCodex(BaseChatLLM):
     def provider(self) -> str:
         return "codex"
 
-    def invoke(self, messages: List[BaseMessage], tools: List[Tool] = [], structured_output=None, json_mode: bool = False) -> LLMEvent:
+    def invoke(
+        self,
+        messages: List[BaseMessage],
+        tools: List[Tool] = [],
+        structured_output=None,
+        json_mode: bool = False,
+    ) -> LLMEvent:
         headers, body = self._build_request(messages, tools)
         url = self._base_url + CODEX_PATH
         events: list[dict] = []
@@ -496,22 +543,38 @@ class ChatCodex(BaseChatLLM):
 
         return _extract_final(events)
 
-    async def ainvoke(self, messages: List[BaseMessage], tools: List[Tool] = [], structured_output=None, json_mode: bool = False) -> LLMEvent:
-        headers, body = await self._build_request_async(messages, tools)
-        url = self._base_url + CODEX_PATH
-        events: list[dict] = []
+    async def ainvoke(
+        self,
+        messages: List[BaseMessage],
+        tools: List[Tool] = [],
+        structured_output=None,
+        json_mode: bool = False,
+    ) -> LLMEvent:
+        try:
+            headers, body = await self._build_request_async(messages, tools)
+            url = self._base_url + CODEX_PATH
+            events: list[dict] = []
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    event = _parse_sse_line(line)
-                    if event:
-                        events.append(event)
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        event = _parse_sse_line(line)
+                        if event:
+                            events.append(event)
 
-        return _extract_final(events)
+            return _extract_final(events)
+        except Exception as e:
+            logger.error(f"LLM error | {e}")
+            return LLMEvent(type=LLMEventType.ERROR, error=str(e))
 
-    def stream(self, messages: List[BaseMessage], tools: List[Tool] = [], structured_output=None, json_mode: bool = False) -> Iterator[LLMStreamEvent]:
+    def stream(
+        self,
+        messages: List[BaseMessage],
+        tools: List[Tool] = [],
+        structured_output=None,
+        json_mode: bool = False,
+    ) -> Iterator[LLMStreamEvent]:
         headers, body = self._build_request(messages, tools)
         url = self._base_url + CODEX_PATH
 
@@ -559,7 +622,7 @@ class ChatCodex(BaseChatLLM):
                             )
 
         if text_started:
-            yield LLMStreamEvent(type=LLMStreamEventType.TEXT_END, usage=usage)
+            yield LLMStreamEvent(type=LLMStreamEventType.TEXT_END, usage=usage, stop_reason=StopReason.END_TURN)
 
         if tool_name and tool_call_id:
             try:
@@ -570,71 +633,85 @@ class ChatCodex(BaseChatLLM):
                 type=LLMStreamEventType.TOOL_CALL,
                 tool_call=ToolCall(id=tool_call_id, name=tool_name, params=params),
                 usage=usage,
+                stop_reason=StopReason.TOOL_CALL,
             )
 
-    async def astream(self, messages: List[BaseMessage], tools: List[Tool] = [], structured_output=None, json_mode: bool = False) -> AsyncIterator[LLMStreamEvent]:
-        headers, body = await self._build_request_async(messages, tools)
-        url = self._base_url + CODEX_PATH
+    async def astream(
+        self,
+        messages: List[BaseMessage],
+        tools: List[Tool] = [],
+        structured_output=None,
+        json_mode: bool = False,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        try:
+            headers, body = await self._build_request_async(messages, tools)
+            url = self._base_url + CODEX_PATH
 
-        tool_name: Optional[str] = None
-        tool_call_id: Optional[str] = None
-        tool_args = ""
-        text_started = False
-        usage = None
+            tool_name: Optional[str] = None
+            tool_call_id: Optional[str] = None
+            tool_args = ""
+            text_started = False
+            usage = None
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=body) as response:
-                if response.status_code >= 400:
-                    error_body = await response.aread()
-                    logger.error("Codex API error %s: %s", response.status_code, error_body.decode())
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    event = _parse_sse_line(line)
-                    if not event:
-                        continue
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with client.stream("POST", url, headers=headers, json=body) as response:
+                    if response.status_code >= 400:
+                        error_body = await response.aread()
+                        logger.error(
+                            "Codex API error %s: %s", response.status_code, error_body.decode()
+                        )
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        event = _parse_sse_line(line)
+                        if not event:
+                            continue
 
-                    etype = event.get("type", "")
+                        etype = event.get("type", "")
 
-                    if etype == "response.output_text.delta":
-                        delta = event.get("delta", "")
-                        if delta:
-                            if not text_started:
-                                text_started = True
-                                yield LLMStreamEvent(type=LLMStreamEventType.TEXT_START)
-                            yield LLMStreamEvent(type=LLMStreamEventType.TEXT_DELTA, content=delta)
+                        if etype == "response.output_text.delta":
+                            delta = event.get("delta", "")
+                            if delta:
+                                if not text_started:
+                                    text_started = True
+                                    yield LLMStreamEvent(type=LLMStreamEventType.TEXT_START)
+                                yield LLMStreamEvent(type=LLMStreamEventType.TEXT_DELTA, content=delta)
 
-                    elif etype == "response.output_item.added":
-                        item = event.get("item", {})
-                        if item.get("type") == "function_call":
-                            tool_name = item.get("name")
-                            tool_call_id = item.get("call_id") or item.get("id")
+                        elif etype == "response.output_item.added":
+                            item = event.get("item", {})
+                            if item.get("type") == "function_call":
+                                tool_name = item.get("name")
+                                tool_call_id = item.get("call_id") or item.get("id")
 
-                    elif etype == "response.function_call_arguments.delta":
-                        tool_args += event.get("delta", "")
+                        elif etype == "response.function_call_arguments.delta":
+                            tool_args += event.get("delta", "")
 
-                    elif etype == "response.completed":
-                        resp = event.get("response", {})
-                        usage_data = resp.get("usage", {})
-                        if usage_data:
-                            usage = TokenUsage(
-                                prompt_tokens=usage_data.get("input_tokens", 0),
-                                completion_tokens=usage_data.get("output_tokens", 0),
-                                total_tokens=usage_data.get("total_tokens", 0),
-                            )
+                        elif etype == "response.completed":
+                            resp = event.get("response", {})
+                            usage_data = resp.get("usage", {})
+                            if usage_data:
+                                usage = TokenUsage(
+                                    prompt_tokens=usage_data.get("input_tokens", 0),
+                                    completion_tokens=usage_data.get("output_tokens", 0),
+                                    total_tokens=usage_data.get("total_tokens", 0),
+                                )
 
-        if text_started:
-            yield LLMStreamEvent(type=LLMStreamEventType.TEXT_END, usage=usage)
+            if text_started:
+                yield LLMStreamEvent(type=LLMStreamEventType.TEXT_END, usage=usage, stop_reason=StopReason.END_TURN)
 
-        if tool_name and tool_call_id:
-            try:
-                params = json.loads(tool_args)
-            except json.JSONDecodeError:
-                params = {}
-            yield LLMStreamEvent(
-                type=LLMStreamEventType.TOOL_CALL,
-                tool_call=ToolCall(id=tool_call_id, name=tool_name, params=params),
-                usage=usage,
-            )
+            if tool_name and tool_call_id:
+                try:
+                    params = json.loads(tool_args)
+                except json.JSONDecodeError:
+                    params = {}
+                yield LLMStreamEvent(
+                    type=LLMStreamEventType.TOOL_CALL,
+                    tool_call=ToolCall(id=tool_call_id, name=tool_name, params=params),
+                    usage=usage,
+                    stop_reason=StopReason.TOOL_CALL,
+                )
+        except Exception as e:
+            logger.error(f"LLM stream error | {e}")
+            yield LLMStreamEvent(type=LLMStreamEventType.ERROR, content=str(e))
 
     def get_metadata(self) -> Metadata:
         context_window = 128_000

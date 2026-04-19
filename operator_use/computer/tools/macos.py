@@ -2,10 +2,15 @@
 
 import asyncio
 import json
+import logging
 from typing import Literal, Optional
+
 from pydantic import BaseModel, Field, model_validator
 from operator_use.tools import Tool, ToolResult
 from operator_use.computer.macos import ax
+from operator_use.computer.macos.ax import patterns as ax_patterns
+
+logger = logging.getLogger(__name__)
 
 
 KEY_ALIASES = {
@@ -197,6 +202,18 @@ async def computer(
             if clicks == 0:
                 ax.SetCursorPos(x, y)
                 return ToolResult.success_result(f"Moved cursor to ({x},{y}).")
+            # Cursorless path: only for left single clicks
+            if button == "left" and clicks == 1:
+                try:
+                    element = ax.ElementAtPosition(ax.GetRootControl(), x, y)
+                    if element and ax_patterns.InvokePattern.IsSupported(element):
+                        invoke = ax_patterns.InvokePattern(element)
+                        if invoke.Invoke():
+                            return ToolResult.success_result(f"Single left clicked at ({x},{y}).")
+                        logger.debug("InvokePattern.Invoke() returned False at (%s,%s), falling back", x, y)
+                except Exception:
+                    logger.debug("Cursorless click failed at (%s,%s), falling back to coordinates", x, y, exc_info=True)
+            # Coordinate fallback
             ax.MoveTo(x, y)
             await asyncio.sleep(0.05)
             match button:
@@ -210,7 +227,9 @@ async def computer(
                     else:
                         ax.Click(x, y)
             labels = {1: "Single", 2: "Double", 3: "Triple"}
-            return ToolResult.success_result(f"{labels.get(clicks, str(clicks))} {button} clicked at ({x},{y}).")
+            return ToolResult.success_result(
+                f"{labels.get(clicks, str(clicks))} {button} clicked at ({x},{y})."
+            )
 
         case "type":
             if not loc:
@@ -218,6 +237,21 @@ async def computer(
             if text is None:
                 return ToolResult.error_result("text is required for type.")
             x, y = loc[0], loc[1]
+            # Cursorless path: only when caret_position is idle (SetValue replaces entire value)
+            if caret_position == "idle":
+                try:
+                    element = ax.ElementAtPosition(ax.GetRootControl(), x, y)
+                    if element and ax_patterns.ValuePattern.IsSupported(element):
+                        vp = ax_patterns.ValuePattern(element)
+                        if not vp.IsReadOnly:
+                            vp.SetValue(text)
+                            if press_enter:
+                                ax.KeyPress(ax.KeyCode.Return)
+                            return ToolResult.success_result(f"Typed at ({x},{y}).")
+                        logger.debug("ValuePattern at (%s,%s) is ReadOnly, falling back", x, y)
+                except Exception:
+                    logger.debug("Cursorless type failed at (%s,%s), falling back to coordinates", x, y, exc_info=True)
+            # Coordinate fallback
             ax.Click(x, y)
             await asyncio.sleep(0.05)
             if clear:
@@ -245,14 +279,18 @@ async def computer(
                 elif direction == "down":
                     ax.WheelDown(clicks=wheel_times)
                 else:
-                    return ToolResult.error_result('Invalid direction for vertical scroll. Use "up" or "down".')
+                    return ToolResult.error_result(
+                        'Invalid direction for vertical scroll. Use "up" or "down".'
+                    )
             elif axis == "horizontal":
                 if direction == "left":
                     ax.WheelLeft(clicks=wheel_times)
                 elif direction == "right":
                     ax.WheelRight(clicks=wheel_times)
                 else:
-                    return ToolResult.error_result('Invalid direction for horizontal scroll. Use "left" or "right".')
+                    return ToolResult.error_result(
+                        'Invalid direction for horizontal scroll. Use "left" or "right".'
+                    )
             else:
                 return ToolResult.error_result('Invalid axis. Use "vertical" or "horizontal".')
             return ToolResult.success_result(f"Scrolled {axis} {direction} by {wheel_times}.")
@@ -284,59 +322,67 @@ async def computer(
 
         case "desktop":
             if not desktop_action:
-                return ToolResult.error_result("desktop_action is required for desktop (create, remove, switch).")
+                return ToolResult.error_result(
+                    "desktop_action is required for desktop (create, remove, switch)."
+                )
             try:
                 match desktop_action:
                     case "create":
-                        script = "\n".join([
-                            'tell application "System Events"',
-                            "    key code 126 using {control down}",
-                            "    delay 1.0",
-                            "end tell",
-                            "",
-                            'tell application "System Events" to tell process "Dock"',
-                            "    click button 1 of group 2 of group 1 of group 1",
-                            "end tell",
-                            "",
-                            "delay 0.5",
-                            "",
-                            'tell application "System Events"',
-                            "    key code 53",
-                            "end tell",
-                        ])
+                        script = "\n".join(
+                            [
+                                'tell application "System Events"',
+                                "    key code 126 using {control down}",
+                                "    delay 1.0",
+                                "end tell",
+                                "",
+                                'tell application "System Events" to tell process "Dock"',
+                                "    click button 1 of group 2 of group 1 of group 1",
+                                "end tell",
+                                "",
+                                "delay 0.5",
+                                "",
+                                'tell application "System Events"',
+                                "    key code 53",
+                                "end tell",
+                            ]
+                        )
                         response, status = ax.ExecuteCommand(script, mode="osascript", timeout=15)
                         if status == 0:
-                            return ToolResult.success_result("Created a new Space via Mission Control.")
+                            return ToolResult.success_result(
+                                "Created a new Space via Mission Control."
+                            )
                         return ToolResult.error_result(f"Error creating Space: {response}")
 
                     case "remove":
-                        script = "\n".join([
-                            'tell application "System Events"',
-                            "    key code 126 using {control down}",
-                            "    delay 1.0",
-                            "end tell",
-                            "",
-                            'tell application "System Events" to tell process "Dock"',
-                            "    set mcGroup to group 1 of group 1",
-                            "    set spacesBar to list 1 of group 2 of mcGroup",
-                            "    set allSpaces to buttons of spacesBar",
-                            "    if (count of allSpaces) is less than or equal to 1 then",
-                            '        error "Cannot remove the last remaining Space."',
-                            "    end if",
-                            "    repeat with sp in allSpaces",
-                            '        if value of attribute "AXIsSelected" of sp is true then',
-                            '            perform action "AXRemoveDesktop" of sp',
-                            "            exit repeat",
-                            "        end if",
-                            "    end repeat",
-                            "end tell",
-                            "",
-                            "delay 0.5",
-                            "",
-                            'tell application "System Events"',
-                            "    key code 53",
-                            "end tell",
-                        ])
+                        script = "\n".join(
+                            [
+                                'tell application "System Events"',
+                                "    key code 126 using {control down}",
+                                "    delay 1.0",
+                                "end tell",
+                                "",
+                                'tell application "System Events" to tell process "Dock"',
+                                "    set mcGroup to group 1 of group 1",
+                                "    set spacesBar to list 1 of group 2 of mcGroup",
+                                "    set allSpaces to buttons of spacesBar",
+                                "    if (count of allSpaces) is less than or equal to 1 then",
+                                '        error "Cannot remove the last remaining Space."',
+                                "    end if",
+                                "    repeat with sp in allSpaces",
+                                '        if value of attribute "AXIsSelected" of sp is true then',
+                                '            perform action "AXRemoveDesktop" of sp',
+                                "            exit repeat",
+                                "        end if",
+                                "    end repeat",
+                                "end tell",
+                                "",
+                                "delay 0.5",
+                                "",
+                                'tell application "System Events"',
+                                "    key code 53",
+                                "end tell",
+                            ]
+                        )
                         response, status = ax.ExecuteCommand(script, mode="osascript", timeout=15)
                         if status == 0:
                             return ToolResult.success_result("Removed the current Space.")
@@ -361,8 +407,20 @@ async def computer(
                         elif name.isdigit():
                             space_num = int(name)
                             if space_num < 1 or space_num > 9:
-                                return ToolResult.error_result(f"Space number must be between 1 and 9. Got: {space_num}")
-                            key_codes = {1: 18, 2: 19, 3: 20, 4: 21, 5: 23, 6: 22, 7: 26, 8: 28, 9: 25}
+                                return ToolResult.error_result(
+                                    f"Space number must be between 1 and 9. Got: {space_num}"
+                                )
+                            key_codes = {
+                                1: 18,
+                                2: 19,
+                                3: 20,
+                                4: 21,
+                                5: 23,
+                                6: 22,
+                                7: 26,
+                                8: 28,
+                                9: 25,
+                            }
                             key_code = key_codes[space_num]
                             script = f'tell application "System Events" to key code {key_code} using {{control down}}'
                         else:
@@ -379,7 +437,9 @@ async def computer(
                         )
 
                     case _:
-                        return ToolResult.error_result(f"Unknown desktop_action: {desktop_action!r}. Use create, remove, or switch.")
+                        return ToolResult.error_result(
+                            f"Unknown desktop_action: {desktop_action!r}. Use create, remove, or switch."
+                        )
             except Exception as e:
                 return ToolResult.error_result(str(e))
 

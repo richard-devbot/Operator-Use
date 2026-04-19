@@ -4,19 +4,23 @@ import asyncio
 import os
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 import logging
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from operator_use.mcp import MCPManager
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 _console = Console()
-_P = "#e5c07b"   # primary   – warm gold
-_S = "#61afef"   # secondary – blue
-_M = "#abb2bf"   # muted     – gray
+_P = "#e5c07b"  # primary   – warm gold
+_S = "#61afef"  # secondary – blue
+_M = "#abb2bf"  # muted     – gray
 
 
 def _row(label: str, value: str) -> None:
@@ -26,9 +30,11 @@ def _row(label: str, value: str) -> None:
 def _version() -> str:
     try:
         from importlib.metadata import version
+
         return version("operator-use")
     except Exception:
         return ""
+
 
 def _print_startup(lines: list[tuple[str, str]], title_suffix: str = "") -> None:
     ver = _version()
@@ -52,12 +58,18 @@ def setup_logging(userdata_dir: Path, verbose: bool = False) -> None:
     logging.basicConfig(level=logging.WARNING, format=fmt, datefmt=datefmt, handlers=handlers)
     logging.getLogger("operator_use").setLevel(logging.INFO)
 
+
 import operator_use
 from operator_use.agent import Agent
 from operator_use.orchestrator import Orchestrator
 from operator_use.bus import Bus
 from operator_use.gateway import Gateway
-from operator_use.gateway.channels import TelegramChannel, DiscordChannel, SlackChannel, TwitchChannel
+from operator_use.gateway.channels import (
+    TelegramChannel,
+    DiscordChannel,
+    SlackChannel,
+    TwitchChannel,
+)
 from operator_use.acp import ACPStdioChannel, ACPStdioConfig, ACPChannel, ACPServerConfig
 from operator_use.gateway.channels.config import TelegramConfig
 from operator_use.gateway.channels.discord import DiscordConfig
@@ -70,7 +82,7 @@ from operator_use.crons.views import CronJob
 from operator_use.crons import Cron
 from operator_use.bus import OutgoingMessage, IncomingMessage, TextPart
 from operator_use.config import Config, load_config, AgentDefinition
-from operator_use.paths import get_named_workspace_dir
+from operator_use.config.paths import get_named_workspace_dir
 from typing import Optional
 from pathlib import Path
 
@@ -88,6 +100,7 @@ LLM_CLASS_MAP = {
     "vllm": "ChatVLLM",
     "deepseek": "ChatDeepSeek",
     "xai": "ChatXai",
+    "zai": "ChatZAI",
     "codex": "ChatCodex",
     "claude_code": "ChatClaudeCode",
     "antigravity": "ChatAntigravity",
@@ -122,14 +135,15 @@ IMAGE_CLASS_MAP = {
 }
 
 SEARCH_CLASS_MAP = {
-    "ddgs":   "DDGSSearch",
-    "exa":    "ExaSearch",
+    "ddgs": "DDGSSearch",
+    "exa": "ExaSearch",
     "tavily": "TavilySearch",
 }
 
 
 def _make_llm(config: Config, llm_conf) -> Optional[BaseChatLLM]:
     import operator_use.providers as providers
+
     if not llm_conf.provider:
         return None
     llm_cls_name = LLM_CLASS_MAP.get(llm_conf.provider)
@@ -146,6 +160,7 @@ def _make_llm(config: Config, llm_conf) -> Optional[BaseChatLLM]:
 
 def _make_stt(config: Config) -> Optional[BaseSTT]:
     import operator_use.providers as providers
+
     stt_conf = config.stt
     if not stt_conf.enabled or not stt_conf.provider:
         return None
@@ -159,6 +174,7 @@ def _make_stt(config: Config) -> Optional[BaseSTT]:
 
 def _make_tts(config: Config) -> Optional[BaseTTS]:
     import operator_use.providers as providers
+
     tts_conf = config.tts
     if not tts_conf.enabled or not tts_conf.provider:
         return None
@@ -176,12 +192,14 @@ def _make_tts(config: Config) -> Optional[BaseTTS]:
 def _make_search(config: Config):
     """Always returns a search provider — falls back to DDGSSearch if not configured."""
     import operator_use.providers as providers
+
     srch_conf = config.search
     provider_key = srch_conf.provider or "ddgs"
     srch_cls_name = SEARCH_CLASS_MAP.get(provider_key, "DDGSSearch")
     srch_cls = getattr(providers, srch_cls_name, None)
     if srch_cls is None:
         from operator_use.providers.ddgs import DDGSSearch
+
         return DDGSSearch()
     if provider_key in ("exa", "tavily"):
         return srch_cls(api_key=srch_conf.api_key or "")
@@ -190,6 +208,7 @@ def _make_search(config: Config):
 
 def _make_image(config: Config):
     import operator_use.providers as providers
+
     img_conf = config.image
     if not img_conf.enabled or not img_conf.provider:
         return None
@@ -210,7 +229,9 @@ def _make_image(config: Config):
     return img_cls(**img_kwargs)
 
 
-def _make_models(config: Config) -> tuple[Optional[BaseChatLLM], Optional[BaseSTT], Optional[BaseTTS]]:
+def _make_models(
+    config: Config,
+) -> tuple[Optional[BaseChatLLM], Optional[BaseSTT], Optional[BaseTTS]]:
     """Build LLM + STT + TTS from the first agent's config (used by REPL and other single-agent commands)."""
     first_defn = config.agents.list[0] if config.agents.list else None
     llm_conf = first_defn.llm_config if first_defn and first_defn.llm_config else None
@@ -224,14 +245,15 @@ def _resolve_agent_workspace(defn: AgentDefinition) -> Path:
     return get_named_workspace_dir(defn.id)
 
 
-
 PLUGIN_REGISTRY: dict[str, type] = {}
+
 
 def _get_plugin_registry() -> dict[str, type]:
     global PLUGIN_REGISTRY
     if not PLUGIN_REGISTRY:
         from operator_use.computer.plugin import ComputerPlugin
         from operator_use.web.plugin import BrowserPlugin
+
         PLUGIN_REGISTRY = {
             "browser_use": BrowserPlugin,
             "computer_use": ComputerPlugin,
@@ -239,9 +261,11 @@ def _get_plugin_registry() -> dict[str, type]:
     return PLUGIN_REGISTRY
 
 
-def _build_agents(config: Config, cron, gateway, bus, image=None, search=None) -> tuple[dict[str, Agent], "MCPManager | None"]:
+def _build_agents(
+    config: Config, cron, gateway, bus, image=None, search=None
+) -> tuple[dict[str, Agent], "MCPManager | None"]:
     """Instantiate one Agent per agent definition in config."""
-    from operator_use.agent.tools.builtin import resolve_tools
+    from operator_use.agent.tools import resolve_tools
 
     defaults = config.agents.defaults
     agent_defs = config.agents.list
@@ -255,10 +279,14 @@ def _build_agents(config: Config, cron, gateway, bus, image=None, search=None) -
     for defn in agent_defs:
         llm_conf = defn.llm_config
         if not llm_conf:
-            raise ValueError(f"Agent '{defn.id}' has no llmConfig. Set it in config.json or run 'operator onboard'.")
+            raise ValueError(
+                f"Agent '{defn.id}' has no llmConfig. Set it in config.json or run 'operator onboard'."
+            )
         llm = _make_llm(config, llm_conf)
         if llm is None:
-            raise ValueError(f"Agent '{defn.id}': failed to initialize LLM provider '{llm_conf.provider}'. Check the provider name and API key.")
+            raise ValueError(
+                f"Agent '{defn.id}': failed to initialize LLM provider '{llm_conf.provider}'. Check the provider name and API key."
+            )
         workspace = _resolve_agent_workspace(defn)
 
         plugins = []
@@ -277,6 +305,7 @@ def _build_agents(config: Config, cron, gateway, bus, image=None, search=None) -
         )
 
         from operator_use.agent.context.service import PromptMode
+
         agents[defn.id] = Agent(
             llm=llm,
             agent_id=defn.id,
@@ -294,7 +323,9 @@ def _build_agents(config: Config, cron, gateway, bus, image=None, search=None) -
             plugins=plugins,
             image=image,
             search=search,
-            mcp_servers={name: cfg.model_dump() for name, cfg in config.mcp_servers.items()} if config.mcp_servers else None,
+            mcp_servers={name: cfg.model_dump() for name, cfg in config.mcp_servers.items()}
+            if config.mcp_servers
+            else None,
         )
 
     for agent in agents.values():
@@ -303,6 +334,7 @@ def _build_agents(config: Config, cron, gateway, bus, image=None, search=None) -
     # Wire shared MCP manager to all agents
     # (reference counting allows multiple agents to share the same server connection)
     from operator_use.mcp import MCPManager
+
     mcp_manager = MCPManager(list(config.mcp_servers.values())) if config.mcp_servers else None
     for agent in agents.values():
         agent.tool_register.set_extension("_mcp_manager", mcp_manager)
@@ -370,6 +402,87 @@ def copy_templates_to_workspace(user_data_dir: Path, workspace: Path) -> None:
                     if not dest_file.exists():
                         shutil.copy2(f, dest_file)
 
+
+def write_identity_md(
+    workspace: Path,
+    defn: "AgentDefinition",
+    local_agents: "list[AgentDefinition] | None" = None,
+    acp_agents: "dict | None" = None,
+) -> None:
+    """Write (or update) IDENTITY.md from the AgentDefinition in config."""
+    from datetime import date
+
+    identity_path = workspace / "IDENTITY.md"
+
+    # Preserve birthday on updates
+    birthday = date.today().strftime("%d/%m/%Y")
+    if identity_path.exists():
+        for line in identity_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("BIRTHDAY"):
+                _, _, existing = line.partition(":")
+                existing = existing.strip()
+                if existing:
+                    birthday = existing
+                break
+
+    llm = defn.llm_config
+    llm_label = f"{llm.provider} / {llm.model}" if llm and llm.provider and llm.model else "not configured"
+
+    ch = defn.channels
+    active_channels: list[str] = []
+    if ch:
+        if ch.telegram and ch.telegram.enabled and ch.telegram.token:
+            active_channels.append("telegram")
+        if ch.discord and ch.discord.enabled and ch.discord.token:
+            active_channels.append("discord")
+        if ch.slack and ch.slack.enabled and ch.slack.bot_token:
+            active_channels.append("slack")
+        if ch.twitch and ch.twitch.enabled and ch.twitch.token:
+            active_channels.append("twitch")
+
+    enabled_plugins = [p.id for p in defn.plugins if p.enabled]
+
+    skills_dir = workspace / "skills"
+    skill_names = sorted(d.name for d in skills_dir.iterdir() if d.is_dir()) if skills_dir.exists() else []
+
+    content = (
+        f"## AGENT:\n\n"
+        f"NAME: {defn.id}\n"
+        f"Description: {defn.description or ''}\n"
+        f"BIRTHDAY(DD/MM/YYYY): {birthday}\n"
+        f"Model (LLM): {llm_label}\n"
+        f"Channels: {', '.join(active_channels) or 'none'}\n"
+        f"Plugins: {', '.join(enabled_plugins) or 'none'}\n"
+        f"Skills: {', '.join(skill_names) or 'none'}\n"
+    )
+
+    peers = [a for a in (local_agents or []) if a.id != defn.id]
+    if peers or acp_agents:
+        lines = ["\n## Agents You Have Access To\n"]
+        if peers:
+            lines.append("### Local Agents\n")
+            for a in peers:
+                caps = [p.id for p in a.plugins if p.enabled]
+                caps_str = ", ".join(caps) or "general"
+                lines.append(
+                    f"- Name: {a.id}  "
+                    f"Description: {(a.description or 'none').strip()}  "
+                    f"Capabilities: {caps_str}"
+                )
+        if acp_agents:
+            lines.append("\n### ACP Agents\n")
+            for name, entry in acp_agents.items():
+                desc = (getattr(entry, "description", "") or "").strip() or "none"
+                url = getattr(entry, "base_url", "") or ""
+                caps = getattr(entry, "capabilities", []) or []
+                caps_str = ", ".join(caps) or "general"
+                lines.append(f"- Name: {name}  Description: {desc}  Capabilities: {caps_str}  URL: {url}")
+        content += "\n".join(lines) + "\n"
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    identity_path.write_text(content, encoding="utf-8")
+
+
 async def _build_recovery_message(
     deferred_task: str,
     improvement_session: str,
@@ -389,15 +502,19 @@ async def _build_recovery_message(
     diffs = load_session_diffs(improvement_session, userdata)
     log_entries = InterceptorLog(userdata).get_for_run(run_id)
 
-    diff_text = "\n\n".join(
-        f"### {d['file']}\n```diff\n{d['diff'][:600]}\n```" for d in diffs
-    ) or "(no diffs recorded)"
+    diff_text = (
+        "\n\n".join(f"### {d['file']}\n```diff\n{d['diff'][:600]}\n```" for d in diffs)
+        or "(no diffs recorded)"
+    )
 
-    log_text = "\n".join(
-        f"- Attempt {e['attempt']} ({e['timestamp'][:16]}) | "
-        f"files: {e['files_changed']} | error: {e['error_preview'][:120]}"
-        for e in log_entries
-    ) or "(no previous attempts)"
+    log_text = (
+        "\n".join(
+            f"- Attempt {e['attempt']} ({e['timestamp'][:16]}) | "
+            f"files: {e['files_changed']} | error: {e['error_preview'][:120]}"
+            for e in log_entries
+        )
+        or "(no previous attempts)"
+    )
 
     fallback = (
         f"[SELF-IMPROVEMENT RECOVERY]\n\n"
@@ -415,6 +532,7 @@ async def _build_recovery_message(
     try:
         agent = next(iter(agents.values()))
         from operator_use.messages import HumanMessage
+
         synthesis_prompt = (
             f"An AI agent attempted to improve its own codebase but the change caused a startup failure.\n\n"
             f"Error:\n{startup_error[-800:]}\n\n"
@@ -444,7 +562,8 @@ async def _build_recovery_message(
 
 
 async def main():
-    from operator_use.paths import get_userdata_dir
+    from operator_use.config.paths import get_userdata_dir
+
     USERDATA_DIR = get_userdata_dir()
     verbose = os.getenv("OPERATOR_VERBOSE", "").lower() in ("1", "true", "yes")
     setup_logging(USERDATA_DIR, verbose=verbose)
@@ -470,6 +589,7 @@ async def main():
         Deleting restart.json is the startup-ok signal — its presence after
         worker exit means the gateway never came up (startup failure)."""
         import json as _json
+
         notify = None
         try:
             if _restart_file.exists():
@@ -481,15 +601,21 @@ async def main():
             logger.warning("Could not delete restart.json in on_ready: %s", exc)
 
         if notify:
+
             async def _send_restart_notification() -> None:
                 await asyncio.sleep(3)  # give channels time to connect
-                await bus.publish_outgoing(OutgoingMessage(
-                    channel=notify["channel"],
-                    chat_id=notify["chat_id"],
-                    account_id=notify.get("account_id", ""),
-                    parts=[TextPart(content="System restarted. Send me a message to continue.")],
-                    reply=False,
-                ))
+                await bus.publish_outgoing(
+                    OutgoingMessage(
+                        channel=notify["channel"],
+                        chat_id=notify["chat_id"],
+                        account_id=notify.get("account_id", ""),
+                        parts=[
+                            TextPart(content="System restarted. Send me a message to continue.")
+                        ],
+                        reply=False,
+                    )
+                )
+
             asyncio.create_task(_send_restart_notification())
 
     gateway = Gateway(bus=bus, on_ready=_on_gateway_ready)
@@ -554,11 +680,12 @@ async def main():
 
     any_channel_active = (
         any(
-            defn.channels and (
-                (defn.channels.telegram.enabled and defn.channels.telegram.token) or
-                (defn.channels.discord.enabled and defn.channels.discord.token) or
-                (defn.channels.slack.enabled and defn.channels.slack.bot_token) or
-                (defn.channels.twitch.enabled and defn.channels.twitch.token)
+            defn.channels
+            and (
+                (defn.channels.telegram.enabled and defn.channels.telegram.token)
+                or (defn.channels.discord.enabled and defn.channels.discord.token)
+                or (defn.channels.slack.enabled and defn.channels.slack.bot_token)
+                or (defn.channels.twitch.enabled and defn.channels.twitch.token)
             )
             for defn in config.agents.list
         )
@@ -607,16 +734,16 @@ async def main():
 
     image_provider = _make_image(config)
     search_provider = _make_search(config)  # always set, DDGS is the default
-    agents, mcp_manager = _build_agents(config, cron=cron, gateway=gateway, bus=bus, image=image_provider, search=search_provider)
+    agents, mcp_manager = _build_agents(
+        config, cron=cron, gateway=gateway, bus=bus, image=image_provider, search=search_provider
+    )
 
     # Add ACP server channel after agents are built so all agents are discoverable
     if acp_server_enabled:
         # Build per-agent token map from agent definitions that have acp_token set.
         # When any agent has a token, per-agent auth is used and global auth_token is ignored.
         per_agent_tokens = {
-            defn.id: defn.acp_token
-            for defn in config.agents.list
-            if defn.acp_token
+            defn.id: defn.acp_token for defn in config.agents.list if defn.acp_token
         }
         acp_srv_config = ACPServerConfig(
             enabled=True,
@@ -637,7 +764,8 @@ async def main():
                 task.cancel()
 
     async def _on_gateway_restart() -> None:
-        from operator_use.agent.tools.builtin.control_center import request_restart
+        from operator_use.tools.control_center import request_restart
+
         request_restart()
         await _graceful_restart()
 
@@ -737,6 +865,7 @@ async def main():
 
         if restart_file.exists():
             import json as _json
+
             restart_data = _json.loads(restart_file.read_text(encoding="utf-8"))
             resume_task = restart_data.get("resume_task", "")
             resume_channel = restart_data.get("channel")
@@ -751,8 +880,12 @@ async def main():
             if run_id:
                 for _agent in agents.values():
                     _agent.tool_register.set_extension("_run_id", run_id)
-            print(f"[restart] Continuation found (channel={resume_channel} chat_id={resume_chat_id}): {resume_task[:80]}", flush=True)
+            print(
+                f"[restart] Continuation found (channel={resume_channel} chat_id={resume_chat_id}): {resume_task[:80]}",
+                flush=True,
+            )
             if resume_task and resume_channel and resume_chat_id:
+
                 async def _dispatch_continuation():
                     await asyncio.sleep(10)
                     final_task = resume_task
@@ -767,12 +900,20 @@ async def main():
                             agents=agents,
                             userdata=USERDATA_DIR,
                         )
-                    elif run_id and not startup_error and deferred_task and deferred_task != resume_task:
+                    elif (
+                        run_id
+                        and not startup_error
+                        and deferred_task
+                        and deferred_task != resume_task
+                    ):
                         # Successful restart after one or more recovery cycles —
                         # resume the deferred task now that the fix succeeded.
                         final_task = deferred_task
 
-                    print(f"[restart] Dispatching continuation to channel={resume_channel} chat_id={resume_chat_id}", flush=True)
+                    print(
+                        f"[restart] Dispatching continuation to channel={resume_channel} chat_id={resume_chat_id}",
+                        flush=True,
+                    )
                     await bus.publish_incoming(
                         IncomingMessage(
                             channel=resume_channel,
@@ -782,6 +923,7 @@ async def main():
                             user_id="restart",
                         )
                     )
+
                 asyncio.ensure_future(_dispatch_continuation())
 
         await asyncio.gather(
@@ -837,7 +979,7 @@ def _attempt_startup_recovery(exit_code: int) -> bool:
     False otherwise (caller should sys.exit).
     """
     import json as _json
-    from operator_use.paths import get_userdata_dir as _gud
+    from operator_use.config.paths import get_userdata_dir as _gud
     from operator_use.interceptor import revert_session, InterceptorLog
 
     userdata = _gud()
@@ -858,14 +1000,20 @@ def _attempt_startup_recovery(exit_code: int) -> bool:
     if not restart_file.exists():
         # Regular startup error (no self-improvement in flight) — show error and exit.
         if error_text:
-            print(f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}", flush=True)
+            print(
+                f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}",
+                flush=True,
+            )
         return False
 
     try:
         restart_data = _json.loads(restart_file.read_text(encoding="utf-8"))
     except Exception:
         if error_text:
-            print(f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}", flush=True)
+            print(
+                f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}",
+                flush=True,
+            )
         return False
 
     # Check if this is a self-improvement recovery scenario.
@@ -873,7 +1021,10 @@ def _attempt_startup_recovery(exit_code: int) -> bool:
     if not improvement_session:
         # restart.json exists but no improvement_session — not a recovery scenario.
         if error_text:
-            print(f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}", flush=True)
+            print(
+                f"\n[supervisor] Startup failure (exit={exit_code}):\n{error_text[-1500:]}",
+                flush=True,
+            )
         return False
 
     # Self-improvement recovery: revert files, log failure, and prepare recovery message.
@@ -890,8 +1041,11 @@ def _attempt_startup_recovery(exit_code: int) -> bool:
     # Restore files from snapshots.
     reverted_files = revert_session(improvement_session, userdata)
     if reverted_files:
-        print(f"[supervisor] Reverted {len(reverted_files)} file(s): "
-              f"{[__import__('pathlib').Path(p).name for p in reverted_files]}", flush=True)
+        print(
+            f"[supervisor] Reverted {len(reverted_files)} file(s): "
+            f"{[__import__('pathlib').Path(p).name for p in reverted_files]}",
+            flush=True,
+        )
     else:
         print("[supervisor] No snapshots found — files not reverted.", flush=True)
 
@@ -899,7 +1053,10 @@ def _attempt_startup_recovery(exit_code: int) -> bool:
     # otherwise generate a fresh one to mark the start of a new failure run.
     # Preserve deferred_task across retries — first cycle seeds it from resume_task.
     deferred_task = restart_data.get("deferred_task") or restart_data.get("resume_task", "")
-    run_id: str = restart_data.get("run_id") or f"R-{__import__('datetime').datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    run_id: str = (
+        restart_data.get("run_id")
+        or f"R-{__import__('datetime').datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    )
     print(f"[supervisor] run_id={run_id}", flush=True)
 
     # Append to consecutive failure log.
@@ -946,13 +1103,15 @@ def run(verbose: bool = False) -> None:
     import sys
 
     if os.getenv("IS_WORKER"):
-        from operator_use.agent.tools.builtin.control_center import requested_exit_code
+        from operator_use.tools.control_center import requested_exit_code
+
         try:
             asyncio.run(main())
         except Exception:
             import json as _json
             import traceback as _tb
-            from operator_use.paths import get_userdata_dir as _gud
+            from operator_use.config.paths import get_userdata_dir as _gud
+
             _error_file = _gud() / "startup_error.json"
             try:
                 _error_file.parent.mkdir(parents=True, exist_ok=True)
@@ -967,7 +1126,9 @@ def run(verbose: bool = False) -> None:
 
     worker_env = {**os.environ, "IS_WORKER": "1", "OPERATOR_VERBOSE": "1" if verbose else "0"}
     while True:
-        result = subprocess.run([sys.executable, "-m", "operator_use"] + sys.argv[1:], env=worker_env)
+        result = subprocess.run(
+            [sys.executable, "-m", "operator_use"] + sys.argv[1:], env=worker_env
+        )
         if result.returncode == RESTART_EXIT_CODE:
             print("[supervisor] Restarting...", flush=True)
             continue

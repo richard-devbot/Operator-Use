@@ -7,15 +7,76 @@ from typing import Literal, Optional
 from asyncio import sleep
 from pathlib import Path
 from os import getcwd
+from urllib.parse import urlparse as _urlparse
+import os as _os
 import httpx
 import json
+
+_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100MB
+
+# Sensitive browser APIs the LLM must not access via script execution.
+# These could exfiltrate cookies, tokens, or stored credentials.
+_BLOCKED_JS_APIS = [
+    "document.cookie",
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "XMLHttpRequest",
+    "navigator.credentials",
+    "crypto.subtle",
+    "chrome.identity",
+]
+
+
+def _check_script_safety(script_content: str) -> str | None:
+    """Return an error message if the script accesses sensitive browser APIs, else None."""
+    lower = script_content.lower()
+    for api in _BLOCKED_JS_APIS:
+        if api.lower() in lower:
+            return (
+                f"Script blocked: accesses sensitive browser API {api!r}. "
+                "This API could expose cookies, auth tokens, or stored credentials. "
+                "Remove the sensitive API access and try again."
+            )
+    return None
+
+
+def _validate_download(url: str, filename: str, downloads_dir: Path) -> str | None:
+    """Validate a download request. Returns error message if invalid, None if safe."""
+    # Scheme check — only http/https
+    parsed = _urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"Download blocked: only http/https URLs allowed, got scheme {parsed.scheme!r}"
+
+    # Filename sanitization — strip path components, reject traversal
+    safe_name = _os.path.basename(filename) if filename else _os.path.basename(parsed.path) or "download"
+    if not safe_name or safe_name in (".", ".."):
+        return f"Download blocked: invalid filename {filename!r}"
+
+    # Path containment — resolved target must stay inside downloads dir
+    target = (downloads_dir / safe_name).resolve()
+    if not target.is_relative_to(downloads_dir.resolve()):
+        return f"Download blocked: path traversal in filename {filename!r}"
+
+    return None
 
 
 class BrowserTool(BaseModel):
     action: Literal[
-        "goto", "back", "forward",
-        "click", "type", "key", "scroll", "menu", "upload",
-        "tab", "wait", "script", "scrape", "download",
+        "goto",
+        "back",
+        "forward",
+        "click",
+        "type",
+        "key",
+        "scroll",
+        "menu",
+        "upload",
+        "tab",
+        "wait",
+        "script",
+        "scrape",
+        "download",
     ] = Field(
         ...,
         description=(
@@ -37,34 +98,70 @@ class BrowserTool(BaseModel):
         ),
     )
     # Navigation
-    url: Optional[str] = Field(default=None, description="Full URL including protocol. Required for goto and download.")
+    url: Optional[str] = Field(
+        default=None, description="Full URL including protocol. Required for goto and download."
+    )
     # Coordinates
-    x: Optional[int] = Field(default=None, description="X coordinate. Required for click, type, scroll (optional), menu, upload.")
-    y: Optional[int] = Field(default=None, description="Y coordinate. Required for click, type, scroll (optional), menu, upload.")
+    x: Optional[int] = Field(
+        default=None,
+        description="X coordinate. Required for click, type, scroll (optional), menu, upload.",
+    )
+    y: Optional[int] = Field(
+        default=None,
+        description="Y coordinate. Required for click, type, scroll (optional), menu, upload.",
+    )
     # Type / key
-    text: Optional[str] = Field(default=None, description="Text to type (action=type) or key/combo to press (action=key), e.g. 'Control+A'.")
-    clear: bool = Field(default=False, description="Clear existing field content before typing (action=type).")
-    press_enter: bool = Field(default=False, description="Press Enter after typing to submit (action=type).")
+    text: Optional[str] = Field(
+        default=None,
+        description="Text to type (action=type) or key/combo to press (action=key), e.g. 'Control+A'.",
+    )
+    clear: bool = Field(
+        default=False, description="Clear existing field content before typing (action=type)."
+    )
+    press_enter: bool = Field(
+        default=False, description="Press Enter after typing to submit (action=type)."
+    )
     # Scroll
-    direction: Literal["up", "down"] = Field(default="down", description="Scroll direction (action=scroll).")
+    direction: Literal["up", "down"] = Field(
+        default="down", description="Scroll direction (action=scroll)."
+    )
     amount: int = Field(default=500, description="Pixels to scroll per action (action=scroll).")
     # Key repeat
     times: int = Field(default=1, description="Number of times to press the key (action=key).")
     # Tab management
-    tab_mode: Literal["open", "close", "switch"] = Field(default="open", description="Tab operation: open a new tab, close the current tab, or switch to a tab by index (action=tab).")
-    tab_index: Optional[int] = Field(default=None, description="Zero-based index of the tab to switch to (action=tab, tab_mode=switch).")
+    tab_mode: Literal["open", "close", "switch"] = Field(
+        default="open",
+        description="Tab operation: open a new tab, close the current tab, or switch to a tab by index (action=tab).",
+    )
+    tab_index: Optional[int] = Field(
+        default=None,
+        description="Zero-based index of the tab to switch to (action=tab, tab_mode=switch).",
+    )
     # Wait
     time: Optional[int] = Field(default=None, description="Seconds to pause (action=wait).")
     # Script
-    script: Optional[str] = Field(default=None, description="JavaScript to execute on the page (action=script). Always wrap in IIFE with try-catch.")
+    script: Optional[str] = Field(
+        default=None,
+        description="JavaScript to execute on the page (action=script). Always wrap in IIFE with try-catch.",
+    )
     # Scrape
-    prompt: Optional[str] = Field(default=None, description="Optional extraction hint for scrape. If omitted, full page markdown is returned.")
+    prompt: Optional[str] = Field(
+        default=None,
+        description="Optional extraction hint for scrape. If omitted, full page markdown is returned.",
+    )
     # Upload
-    filenames: Optional[list[str]] = Field(default=None, description="Filenames to upload from ./uploads directory (action=upload).")
+    filenames: Optional[list[str]] = Field(
+        default=None, description="Filenames to upload from ./uploads directory (action=upload)."
+    )
     # Menu / select
-    labels: Optional[list[str]] = Field(default=None, description="Visible option labels to select in a <select> dropdown (action=menu).")
+    labels: Optional[list[str]] = Field(
+        default=None,
+        description="Visible option labels to select in a <select> dropdown (action=menu).",
+    )
     # Download
-    filename: Optional[str] = Field(default=None, description="Local filename to save the downloaded file as (action=download).")
+    filename: Optional[str] = Field(
+        default=None, description="Local filename to save the downloaded file as (action=download)."
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -146,7 +243,9 @@ async def browser(
 ) -> ToolResult:
     browser = kwargs.get("browser")
     if browser is None:
-        return ToolResult.error_result("Browser is not available. Ensure browser_use plugin is enabled.")
+        return ToolResult.error_result(
+            "Browser is not available. Ensure browser_use plugin is enabled."
+        )
     if browser._client is None:
         await browser.init_browser()
         await browser.init_tabs()
@@ -191,7 +290,9 @@ async def browser(
 
         case "key":
             if not text:
-                return ToolResult.error_result("text is required for key (the key or combination to press, e.g. 'Enter', 'Control+A').")
+                return ToolResult.error_result(
+                    "text is required for key (the key or combination to press, e.g. 'Enter', 'Control+A')."
+                )
             for _ in range(times):
                 await page.key_press(text)
             return ToolResult.success_result(f"Pressed {text}.")
@@ -199,7 +300,9 @@ async def browser(
         case "scroll":
             if x is not None and y is not None:
                 await page.scroll_at(x, y, direction, amount)
-                return ToolResult.success_result(f"Scrolled {direction} at ({x}, {y}) by {amount}px.")
+                return ToolResult.success_result(
+                    f"Scrolled {direction} at ({x}, {y}) by {amount}px."
+                )
             pos = await page.get_scroll_position()
             scroll_y = pos.get("scrollY", 0)
             max_scroll = pos.get("scrollHeight", 0) - pos.get("innerHeight", 0)
@@ -225,12 +328,16 @@ async def browser(
                 case "switch":
                     tabs = await browser.get_all_tabs()
                     if tab_index is None or tab_index < 0 or tab_index >= len(tabs):
-                        return ToolResult.error_result(f"tab_index {tab_index} out of range. Available tabs: {len(tabs)}")
+                        return ToolResult.error_result(
+                            f"tab_index {tab_index} out of range. Available tabs: {len(tabs)}"
+                        )
                     await browser.switch_tab(tab_index)
                     await browser._wait_for_page(timeout=5.0)
                     return ToolResult.success_result(f"Switched to tab {tab_index}.")
                 case _:
-                    return ToolResult.error_result("Invalid tab_mode. Use 'open', 'close', or 'switch'.")
+                    return ToolResult.error_result(
+                        "Invalid tab_mode. Use 'open', 'close', or 'switch'."
+                    )
 
         case "wait":
             if time is None:
@@ -256,11 +363,16 @@ async def browser(
             if not labels:
                 return ToolResult.error_result("labels is required for menu.")
             await page.select_option_at(x, y, labels)
-            return ToolResult.success_result(f"Selected {', '.join(labels)} in dropdown at ({x}, {y}).")
+            return ToolResult.success_result(
+                f"Selected {', '.join(labels)} in dropdown at ({x}, {y})."
+            )
 
         case "script":
             if not script:
                 return ToolResult.error_result("script is required for script.")
+            _safety_err = _check_script_safety(script)
+            if _safety_err:
+                return ToolResult.error_result(_safety_err)
             result = await page.execute_script(script, truncate=True, repair=True)
             return ToolResult.success_result(f"Script result: {result}")
 
@@ -275,13 +387,29 @@ async def browser(
             if not filename:
                 return ToolResult.error_result("filename is required for download.")
             folder_path = Path(browser.config.downloads_dir)
+            _err = _validate_download(url or "", filename or "", folder_path)
+            if _err:
+                return ToolResult.error_result(_err)
+            # Use sanitized basename — never the raw filename from the LLM
+            safe_name = _os.path.basename(filename) or _os.path.basename(url.split("?")[0]) or "download"
             async with httpx.AsyncClient() as client:
+                # Preflight size check via Content-Length header
+                head_resp = await client.head(url)
+                content_length = int(head_resp.headers.get("content-length", 0))
+                if content_length > _MAX_DOWNLOAD_SIZE:
+                    return ToolResult.error_result(
+                        f"Download blocked: Content-Length {content_length} bytes exceeds 100MB limit."
+                    )
                 response = await client.get(url)
                 response.raise_for_status()
-            path = folder_path / filename
+                if len(response.content) > _MAX_DOWNLOAD_SIZE:
+                    return ToolResult.error_result(
+                        "Download blocked: response body exceeds 100MB size limit."
+                    )
+            path = folder_path / safe_name
             with open(path, "wb") as f:
                 f.write(response.content)
-            return ToolResult.success_result(f"Downloaded {filename} from {url} to {path}.")
+            return ToolResult.success_result(f"Downloaded {safe_name} from {url} to {path}.")
 
         case _:
             return ToolResult.error_result(f"Unknown action: {action!r}.")
